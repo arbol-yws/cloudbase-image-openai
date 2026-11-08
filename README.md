@@ -4,26 +4,16 @@
 
 核心只有三步：接收 OpenAI 请求 → 调用 CloudBase → 按 OpenAI 结构返回。服务不复制 CloudBase 的模型策略：除“有参考图但未传 `size` 时按参考图比例换算尺寸”外，尺寸具体取值、prompt 长度、参考图数量、图片类型等均由上游判定。
 
-## 两条协议
+## 支持的接口类型
 
-| 判定 | 协议 | CloudBase provider | 请求形态 | 返回路径 |
-| --- | --- | --- | --- | --- |
-| `model` 以**小写**前缀 `hy-image-` 开头，或等于 `hy-image-v3.5-preview` | Messages | `cloudbase` | `messages` 内容块，文本与 `image_url` 混排 | `choices[0].delta.image.url` |
-| 其他任意 `model` | 旧版 | `hunyuan-image` | `prompt` + `image_urls` / `images` | `data[0].url` |
+`model` 原样透传，服务不做白名单、别名或默认值；具体可用模型见 [CloudBase 图片生成文档](https://docs.cloudbase.net/ai/image-model/overview)。
 
-`model` 原样转发，不做白名单、别名或默认值。分派同时使用“文档模型精确匹配 + 大小写敏感的前缀兜底”，大写旧模型（`HY-Image-...`）不会被误送进 Messages 分支。未知小写 `hy-image-*` 会走 Messages，未知其他模型走旧版，是否接受由 CloudBase 决定。
+本服务支持两类上游接口，按 `model` 是否以**小写**前缀 `hy-image-` 开头分派（大小写敏感）：
 
-旧版协议始终使用 SDK 默认端点 `images/ar/generations`；服务不覆盖 `generateImageSubUrlConfig`，也不根据“是否带参考图”切换端点。参考图按文档映射：Messages 把文本和 `image_url`（URL 或 data URL）混排进 `messages` 内容块；旧版把 URL 映射为 `image_urls`，把 base64/data URL 映射为 `images`。张数、类型、大小由 CloudBase 判定。
+- **CloudBase Messages 协议（新版）**：`model` 以小写 `hy-image-` 开头时走这条。文本与 `image_url` 混排进 `messages`，图片从 `choices[0].delta.image.url` 取。文档：[CloudBase Messages 协议](https://docs.cloudbase.net/ai/image-model/hy-image-3.5-preview)
+- **旧版图像接口**：其他 `model` 走这条。请求为 `prompt` + `image_urls` / `images`，图片从 `data[0].url` 取。文档：[历史版本（旧模型）](https://docs.cloudbase.net/ai/image-model/legacy-image-model)
 
-### 文档模型
-
-| 模型标识 | 状态 | 能力 | 参考图 | 尺寸 | 返回 |
-| --- | --- | --- | --- | --- | --- |
-| `hy-image-v3.5-preview` | 当前版本 | 文生图 + 图生图 + 多轮编辑 | ≤20 张，单图 ≤20MB | 宽高 [256, 8192]，面积 ≤4096×4096 | `choices[0].delta.image.url`，12 小时 |
-| `HY-Image-3.0-Plus-4090-Tob-v1.0` | 已废弃 | 仅文生图 | 不支持 | `1024x1024`、`1280x720`、`720x1280`、`1280x1280` | `data[0].url`，24 小时 |
-| `HY-Image-v3.0-I2I-ToB-v1.0.1` | 已废弃 | 图生图（必须垫图） | 1 张，≤10MB，jpg/jpeg/png | 同上四档 | `data[0].url`，24 小时 |
-
-上表是文档约束。服务只做字段类型、凭据、`model` 等必需校验，其余交给 CloudBase 判定。新接入优先使用 `hy-image-v3.5-preview`。
+旧版接口始终使用 SDK 默认端点 `images/ar/generations`；服务不覆盖 `generateImageSubUrlConfig`，也不根据“是否带参考图”切换端点。参考图映射：Messages 把文本和 `image_url`（URL 或 data URL）混排进 `messages` 内容块；旧版把 URL 映射为 `image_urls`，把 base64/data URL 映射为 `images`。张数、类型、大小由 CloudBase 判定。
 
 ## 前置条件
 
@@ -148,16 +138,16 @@ docker compose up -d --build
 
 ## 请求示例
 
-示例中的 `$CLOUDBASE_APIKEY` 是调用方自己的 CloudBase 服务端 API Key，服务不保存它。
+示例中的 `$CLOUDBASE_APIKEY` 是调用方自己的 CloudBase 服务端 API Key，服务不保存它。`<your-model>` 的取值见 [CloudBase 图片生成文档](https://docs.cloudbase.net/ai/image-model/overview)。
 
-### Messages 协议：`hy-image-v3.5-preview` 图生图
+### Messages 协议图生图（`model` 以小写 `hy-image-` 开头）
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
   -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "hy-image-v3.5-preview",
+    "model": "<your-model>",
     "prompt": "参考这张图，画一只坐在窗台上的橘猫，水彩风格",
     "image": "https://example.com/reference.jpg",
     "size": "1024x1024",
@@ -168,14 +158,14 @@ curl http://localhost:8080/v1/images/generations \
 
 文生图时去掉 `image` 字段即可。
 
-### 旧版协议：`HY-Image-v3.0-I2I-ToB-v1.0.1` 图生图
+### 旧版图像接口图生图（其他 `model`）
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
   -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "HY-Image-v3.0-I2I-ToB-v1.0.1",
+    "model": "<your-model>",
     "prompt": "将这张照片转换为油画风格",
     "image": "https://example.com/reference.jpg",
     "size": "1024x1024"
@@ -304,7 +294,7 @@ node scripts/probe-legacy.js \
 ## 参考文档
 
 - [CloudBase 图片生成 Node SDK 调用](https://docs.cloudbase.net/ai/image-model/node-sdk)
-- [CloudBase Hy-Image-3.5-preview](https://docs.cloudbase.net/ai/image-model/hy-image-3.5-preview)
+- [CloudBase Messages 协议文档](https://docs.cloudbase.net/ai/image-model/hy-image-3.5-preview)
 - [CloudBase 自定义水印](https://docs.cloudbase.net/ai/image-model/custom-watermark)
 - [CloudBase 历史版本（旧模型）](https://docs.cloudbase.net/ai/image-model/legacy-image-model)
 - [微信云开发 AI 客户端 API（footnote）](https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloud/reference-sdk-api/extend/ai/client.html)
