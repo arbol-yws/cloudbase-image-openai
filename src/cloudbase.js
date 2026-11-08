@@ -1,7 +1,7 @@
 'use strict';
 
 const tcb = require('@cloudbase/node-sdk');
-const { ApiError, buildUpstreamMessage, mapUpstreamError, responseRecord } = require('./errors');
+const { ApiError, mapUpstreamError, responseRecord } = require('./errors');
 const { createCapture, runWithContext } = require('./upstream-capture');
 const { deriveOutputSize } = require('./images');
 
@@ -65,14 +65,11 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
       const image = result?.choices?.[0]?.delta?.image;
       if (!image?.url) {
         const upstream = responseRecord(result, capture);
-        throw new ApiError(502, buildUpstreamMessage('CloudBase returned no image.', {
-          status: upstream.status,
-          request_id: upstream.request_id,
-          body: upstream.body,
-        }), {
-          code: 'upstream_empty_response',
-          upstream,
-        });
+        throw new ApiError(
+          502,
+          `CloudBase returned HTTP ${upstream.status ?? 'unknown'} without an image.`,
+          { code: 'upstream_empty_response', upstream },
+        );
       }
       return { url: image.url };
     }
@@ -93,14 +90,11 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
     const item = result?.data?.[0];
     if (!item?.url) {
       const upstream = responseRecord(result, capture);
-      throw new ApiError(502, buildUpstreamMessage('CloudBase returned no image.', {
-        status: upstream.status,
-        request_id: upstream.request_id,
-        body: upstream.body,
-      }), {
-        code: 'upstream_empty_response',
-        upstream,
-      });
+      throw new ApiError(
+        502,
+        `CloudBase returned HTTP ${upstream.status ?? 'unknown'} without an image.`,
+        { code: 'upstream_empty_response', upstream },
+      );
     }
     return { url: item.url };
   }

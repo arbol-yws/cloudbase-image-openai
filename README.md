@@ -2,7 +2,7 @@
 
 把腾讯云 CloudBase 的图片生成能力封装成 OpenAI 兼容的 `POST /v1/images/generations` 接口。服务用 `@cloudbase/node-sdk` 实际调用 CloudBase 生图模型，不包含 mock/fake 返回。
 
-核心只有三步：接收 OpenAI 请求 → 调用 CloudBase → 按 OpenAI 结构返回。服务不复制 CloudBase 的模型策略，尺寸、prompt 长度、参考图数量、图片类型等由上游判定。
+核心只有三步：接收 OpenAI 请求 → 调用 CloudBase → 按 OpenAI 结构返回。服务不复制 CloudBase 的模型策略：除“有参考图但未传 `size` 时按参考图比例换算尺寸”外，尺寸具体取值、prompt 长度、参考图数量、图片类型等均由上游判定。
 
 ## 两条协议
 
@@ -13,7 +13,7 @@
 
 `model` 原样转发，不做白名单、别名或默认值。分派同时使用“文档模型精确匹配 + 大小写敏感的前缀兜底”，大写旧模型（`HY-Image-...`）不会被误送进 Messages 分支。未知小写 `hy-image-*` 会走 Messages，未知其他模型走旧版，是否接受由 CloudBase 决定。
 
-旧版协议始终使用 SDK 默认端点 `images/ar/generations`；服务不覆盖 `generateImageSubUrlConfig`，也不根据“是否带参考图”切换端点。参考图按文档映射：URL → `image_urls`，base64/data URL → `images`。张数、类型、大小由 CloudBase 判定。
+旧版协议始终使用 SDK 默认端点 `images/ar/generations`；服务不覆盖 `generateImageSubUrlConfig`，也不根据“是否带参考图”切换端点。参考图按文档映射：Messages 把文本和 `image_url`（URL 或 data URL）混排进 `messages` 内容块；旧版把 URL 映射为 `image_urls`，把 base64/data URL 映射为 `images`。张数、类型、大小由 CloudBase 判定。
 
 ### 文档模型
 
@@ -23,7 +23,7 @@
 | `HY-Image-3.0-Plus-4090-Tob-v1.0` | 已废弃 | 仅文生图 | 不支持 | `1024x1024`、`1280x720`、`720x1280`、`1280x1280` | `data[0].url`，24 小时 |
 | `HY-Image-v3.0-I2I-ToB-v1.0.1` | 已废弃 | 图生图（必须垫图） | 1 张，≤10MB，jpg/jpeg/png | 同上四档 | `data[0].url`，24 小时 |
 
-上表是文档约束，服务不在本地重复校验。新接入优先使用 `hy-image-v3.5-preview`。
+上表是文档约束。服务只做字段类型、凭据、`model` 等必需校验，其余交给 CloudBase 判定。新接入优先使用 `hy-image-v3.5-preview`。
 
 ## 前置条件
 
@@ -51,7 +51,17 @@ npm install
 CLOUDBASE_ENV_ID=your-env-id PORT=8080 npm start
 ```
 
-也可以先 `cp .env.example .env` 并填写 `.env`，然后 `npm start`。
+也可以使用 `.env` 文件，但要注意：`npm start` 本身不加载 `.env`，需要在当前 shell 导出变量：
+
+```bash
+cp .env.example .env
+set -a && . ./.env && set +a
+npm start
+```
+
+`.env` 会被下面的 `docker compose` 自动读取。
+
+健康检查：`GET /health` 返回 `{"status":"ok"}`，`docker-compose.yml` 用它做容器健康检查。
 
 ### docker run
 
@@ -77,7 +87,7 @@ docker compose up -d --build
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `CLOUDBASE_ENV_ID` | 是 | 无 | CloudBase 环境 ID |
+| `CLOUDBASE_ENV_ID` | 是 | 无 | CloudBase 环境 ID；也兼容 `TCB_ENV` |
 | `CLOUDBASE_APIKEY` | 否 | 无 | 可选兜底：CloudBase 服务端 API Key |
 | `CLOUDBASE_SECRET_ID` | 否 | 无 | 可选兜底：腾讯云 API `secretId`；也兼容 `TENCENTCLOUD_SECRETID` |
 | `CLOUDBASE_SECRET_KEY` | 否 | 无 | 可选兜底：腾讯云 API `secretKey`；也兼容 `TENCENTCLOUD_SECRETKEY` |
@@ -102,7 +112,7 @@ docker compose up -d --build
 | `seed` | integer | 否 | 透传给 CloudBase；`n > 1` 时按序号派生 |
 | `revise` | boolean | 否 | 仅旧版协议，是否改写 prompt；默认取 `REVISE_PROMPT` |
 
-只做字段存在性与类型检查。`size` 的具体取值、prompt 长度、参考图数量和类型、`seed` 范围等均由 CloudBase 判定。未列出的字段会被忽略，不额外返回 400。
+只做字段存在性与类型检查。除“未传 `size` 且带参考图时按比例换算”外，`size` 的具体取值、prompt 长度、参考图数量和类型、`seed` 范围等均由 CloudBase 判定。未列出的字段会被忽略，不额外返回 400。
 
 ## 水印与尺寸
 
@@ -113,12 +123,12 @@ docker compose up -d --build
 为什么是空格而不是空字符串：
 
 - 用户实测确认上游拒绝 `footnote: ""`，空串不受支持。
-- 单个空格是文档允许的 string 取值，视觉上等同无水印，且不替换默认标识。
-- 该效果需以实测为准；如上游行为变化，看日志里的 `upstream.body`。
+- 实测反馈：空格视觉上等同无水印，不替换默认标识；该表现需以实际输出为准。
+- 该效果需以实测为准；上游若对空格也报错，原因会直接出现在响应 `error.message` 里。
 
 - SDK 类型定义：`@cloudbase/ai` 的 `CloudbaseGenerateImageInput.footnote?: string`（Messages）与 `HunyuanARGenerateImageInput.footnote?: string`（旧版），见 `node_modules/@cloudbase/ai/src/type.ts`。
 - 官方文档：`footnote` 是「自定义水印内容」，两条协议各自列出该字段；文档没有规定最小长度，也没有单独的“关闭水印”参数。
-- 微信云开发文档说明 `footnote` 是水印文本，会替换输出图片右下角默认的「AI生成」标识。
+- 微信云开发文档说明 `footnote` 是水印文本，会替换输出图片右下角默认的「AI生成」标识；空格的实际表现与文档描述可能不同，以实测为准。
 
 ### 尺寸
 
@@ -174,6 +184,8 @@ curl http://localhost:8080/v1/images/generations \
 
 `image` 换成 data URL 或原始 base64 时，旧版协议会把它放进 `images` 字段。
 
+两条示例都显式传了 `size`。如果要让输出跟随参考图比例，去掉 `size` 即可，服务会按上面的规则换算。
+
 ## 响应
 
 成功响应严格保持 OpenAI 结构，不增加额外字段：
@@ -202,14 +214,14 @@ curl http://localhost:8080/v1/images/generations \
 
 CloudBase 返回的是临时 URL（新模型 12 小时、旧模型 24 小时有效）。需要长期保存时使用 `b64_json` 或调用后自行转存。
 
-## 错误结构与上游信息
+## 错误结构
 
 失败响应严格保持 OpenAI 错误对象，只有四个字段：
 
 ```json
 {
   "error": {
-    "message": "[adapter] CloudBase rejected the request with HTTP 400. [upstream] status 400, code \"InvalidParameter\", message \"images must contain 1 item\", request_id \"db5f96a2-...\".",
+    "message": "images must contain 1 item",
     "type": "invalid_request_error",
     "param": null,
     "code": "upstream_invalid_request"
@@ -217,38 +229,49 @@ CloudBase 返回的是临时 URL（新模型 12 小时、旧模型 24 小时有�
 }
 ```
 
-`error.message` 由两段纯文本组成，上游原文直接可见，不需要再看日志：
+`error.message` 的取值规则：
 
-- `[adapter]`：本适配层对错误的概括，例如“CloudBase rejected the request with HTTP 400.”。
-- `[upstream]`：上游原始信息，包含 HTTP 状态码、CloudBase 返回的 `code`、`message` 和 `request_id`；如果 SDK 没有透出 body，会回退为 SDK 抛出的原始错误文本，`request_id` 显示 `"unknown"`。
-- 单段文本最多 800 字符，超出部分追加 `... [truncated]`；`Bearer` token、`accessKey`/`secretId`/`secretKey`、`tcb-*` 形态的 key 一律替换为 `[redacted]`。
-- 除 `message` 外不新增任何顶层或 `error` 下的键，`type` / `param` / `code` 语义与 OpenAI 保持一致。
+- 上游有错误内容时，直接使用上游返回的原始 message，不追加前缀、状态码、request_id，也不加本服务的解释。
+- 上游 message 为空时，使用上游返回的 code。
+- 上游完全没有错误内容（例如只有 HTTP 状态码）时，用一句简短说明，例如 `CloudBase returned HTTP 400 without an error message.`。
+- 上游返回成功但没有图片时，`CloudBase returned HTTP 200 without an image.`。
+- 文本最多 800 字符，超出追加 `... [truncated]`；`Bearer` token、`accessKey`/`secretId`/`secretKey`、`tcb-*` 形态的 key 替换为 `[redacted]`。
+- 上游 request_id 只写日志，不出现在响应里。
 
 服务端日志：
 
 - 每个请求只有一行 `http_request`：`request_id`、`method`、`path`、`status`、`duration_ms`、`upstream_request_id`（来自 CloudBase 响应头）。
-- 不再输出上游原始响应体，避免重复和敏感信息落盘；上游详情已经并入响应的 `error.message`。
+- 不输出上游原始响应体：上游原文已经在响应的 `error.message` 里，request_id 在日志里。
 - 只有未捕获异常（服务自身 bug）才额外记录 `unhandled_error` / `uncaught_exception`，带 `request_id` 和完整 `stack`（脱敏）；stack 不会返回给调用方。
-- 抓取方式不变：包装 SDK 的 `tcbopenapicommonrequester.request`，在传输边界拿到 `{ statusCode, headers, body }`，用 `AsyncLocalStorage` 按请求隔离；body 只用于拼 `error.message`。
+- 抓取方式不变：包装 SDK 的 `tcbopenapicommonrequester.request`，在传输边界拿到 `{ statusCode, headers, body }`，用 `AsyncLocalStorage` 按请求隔离；body 只用于生成 `error.message`。
 
 状态码映射：
 
 | 场景 | HTTP 状态码 | `code` |
 | --- | --- | --- |
-| 缺少 `model` / `prompt`，或字段类型错误 | `400` | `model_required` / `invalid_prompt` / `invalid_n` / `invalid_response_format` / `invalid_image` |
+| 请求体不是 JSON 对象 | `400` | `invalid_request_body` |
+| 缺少 `model` / `prompt` | `400` | `model_required` / `invalid_prompt` |
+| `n` / `response_format` / `size` / `seed` 类型或取值错误 | `400` | `invalid_n` / `invalid_response_format` / `invalid_size` / `invalid_seed` |
+| 参考图不是 URL、data URL 或 base64 | `400` | `invalid_image` |
+| JSON 解析失败 | `400` | `invalid_json` |
+| `multipart/form-data` 请求 | `400` | `unsupported_content_type` |
 | 未带 Bearer 且服务端无兜底凭据 | `401` | `missing_credentials` |
+| 路由不存在 | `404` | `not_found` |
 | 请求体过大 | `413` | `request_too_large` |
 | Content-Type 不是 `application/json` | `415` | `unsupported_media_type` |
-| 路由不存在 | `404` | `not_found` |
 | CloudBase 鉴权/环境权限失败 | `502` | `upstream_authentication_error` |
 | CloudBase 参数校验失败（上游 400） | `400` | `upstream_invalid_request` |
+| CloudBase SDK 本地参数校验失败 | `400` | `invalid_parameter` |
 | CloudBase 内容安全审核失败（上游 422） | `400` | `moderation_blocked` |
 | CloudBase 限流 | `429` | `rate_limit_exceeded` |
+| CloudBase 返回成功但没有图片 | `502` | `upstream_empty_response` |
 | CloudBase 其他失败 | `502` | `upstream_error` |
 | CloudBase 超时 | `504` | `upstream_timeout` |
 | 下载生成图片失败/超时 | `502` / `504` | `image_download_failed` / `image_download_timeout` |
+| b64 图片超过 `MAX_B64_BYTES` | `502` | `image_too_large_for_b64` |
+| 未捕获异常 | `500` | `internal_error` |
 
-环境里没有对应模型时，上游通常返回 400（参数或模型不支持）或 403（模型/环境权限）。具体原因以响应 `error.message` 的 `[upstream]` 段为准；服务端日志不再记录上游原文。
+环境里没有对应模型时，上游通常返回 400（参数或模型不支持）或 403（模型/环境权限）。具体原因直接看响应 `error.message`（上游原文）；request_id 在服务端 `http_request` 日志里。
 
 ## 上游探针
 
@@ -276,7 +299,7 @@ node scripts/probe-legacy.js \
 - 不要把 `.env`、API Key、密钥对提交到 Git。
 - 服务不持久化调用方凭据；如配置服务端兜底凭据，请使用最小权限并定期轮换。
 - 对外暴露时建议放在反向代理后启用 TLS，并由网关负责访问控制。
-- 参考图 URL 由 CloudBase 侧拉取，请确认 URL 可公网访问。
+- 参考图 URL 主要由 CloudBase 侧拉取；服务为了换算尺寸会额外读取一次图片头部（只读头部、限制公网地址）。请确认 URL 可公网访问。
 
 ## 参考文档
 

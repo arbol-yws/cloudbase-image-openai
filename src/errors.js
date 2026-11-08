@@ -91,24 +91,18 @@ function upstreamDetails(err, capture) {
     ?? plainObject(json?.Response?.Error)
     ?? json;
   const errCode = String(err?.code ?? '');
+  // Skip HTTP status codes and transport-level codes (ETIMEDOUT, ERR_BAD_REQUEST...).
+  const skipErrCode = /^\d{3}$/.test(errCode)
+    || /^(E[A-Z]+|ERR_[A-Z_]+|UND_ERR_[A-Z_]+|ABORT_ERR)$/.test(errCode);
 
   return {
-    code: firstText(
-      node?.code,
-      node?.Code,
-      json?.code,
-      json?.Code,
-      /^\d{3}$/.test(errCode) ? undefined : errCode,
-      err?.name === 'InvalidParamsError' ? 'INVALID_PARAMS' : undefined,
-    ),
+    code: firstText(node?.code, node?.Code, json?.code, json?.Code),
     message: firstText(
       node?.message,
       node?.Message,
       json?.message,
       json?.Message,
       json?.errMsg,
-      err?.name === 'InvalidParamsError' ? err?.message : undefined,
-      err?.message,
     ),
     request_id: firstText(
       last?.request_id,
@@ -121,27 +115,32 @@ function upstreamDetails(err, capture) {
     ),
     body: last?.body?.text
       ?? (response?.data !== undefined ? safeStringify(response.data) : null),
+    body_json: Boolean(json),
+    err_name: err?.name,
+    err_message: err?.message,
+    err_code: errCode && !skipErrCode ? errCode : undefined,
   };
 }
 
 /**
- * The caller-facing message carries both parts: `[adapter]` is this service's
- * summary, `[upstream]` is the original CloudBase status/code/message and its
- * request id. Everything is redacted and truncated.
+ * Return the upstream's own error text: its message, otherwise its code,
+ * otherwise the raw body. No prefixes, status or request id are appended.
  */
-function buildUpstreamMessage(base, details = {}) {
-  const parts = [`status ${details.status ?? 'unknown'}`];
-  if (details.code) {
-    parts.push(`code "${truncate(redactSecrets(details.code), 120)}"`);
+function upstreamErrorText(details) {
+  const explicit = firstText(details.message, details.code);
+  if (explicit) return truncate(redactSecrets(explicit), MESSAGE_TEXT_LIMIT);
+  if (!details.body_json && details.body && details.body.trim()) {
+    return truncate(redactSecrets(details.body), MESSAGE_TEXT_LIMIT);
   }
-  if (details.message) {
-    parts.push(`message "${truncate(redactSecrets(details.message), MESSAGE_TEXT_LIMIT)}"`);
+  if (details.err_name === 'InvalidParamsError' && details.err_message) {
+    return truncate(redactSecrets(details.err_message), MESSAGE_TEXT_LIMIT);
   }
-  if (!details.code && !details.message && details.body) {
-    parts.push(`body "${truncate(redactSecrets(details.body), MESSAGE_TEXT_LIMIT)}"`);
-  }
-  parts.push(`request_id "${details.request_id ?? 'unknown'}"`);
-  return `[adapter] ${base} [upstream] ${parts.join(', ')}.`;
+  if (details.err_code) return truncate(redactSecrets(details.err_code), MESSAGE_TEXT_LIMIT);
+  return undefined;
+}
+
+function missingUpstreamMessage(status) {
+  return `CloudBase returned HTTP ${status ?? 'unknown'} without an error message.`;
 }
 
 function inferUpstreamStatus(err) {
@@ -217,10 +216,9 @@ function responseRecord(result, capture) {
 }
 
 /**
- * Map a CloudBase SDK/network failure to an OpenAI-style error. The message
- * keeps the strict four-field shape and carries the upstream status/code/
- * message/request_id in plain text, so the caller can see why it was rejected
- * without reading server logs.
+ * Map a CloudBase SDK/network failure to an OpenAI-style error. The message is
+ * the upstream's own text when there is one; otherwise a short adapter note.
+ * Keep the strict four-field shape and the truncation/redaction above.
  */
 function mapUpstreamError(err, context = {}) {
   if (err instanceof ApiError) return err;
@@ -229,7 +227,9 @@ function mapUpstreamError(err, context = {}) {
   const upstream = upstreamRecord(err, context.capture);
   const details = upstreamDetails(err, context.capture);
   const text = upstream.body ?? String(err?.message ?? '');
-  const message = (base) => buildUpstreamMessage(base, { ...details, status: upstream.status });
+  const upstreamStatus = upstream.status ?? status;
+  const explicit = upstreamErrorText(details);
+  const message = (fallback) => explicit ?? fallback;
 
   if (isTimeout(err, text)) {
     return new ApiError(504, message('CloudBase image generation timed out.'), {
@@ -238,19 +238,19 @@ function mapUpstreamError(err, context = {}) {
     });
   }
   if (status === 401 || status === 403) {
-    return new ApiError(502, message('CloudBase rejected the request credential or environment permission.'), {
+    return new ApiError(502, message(missingUpstreamMessage(upstreamStatus)), {
       code: 'upstream_authentication_error',
       upstream,
     });
   }
   if (status === 429) {
-    return new ApiError(429, message('CloudBase rate limit exceeded.'), {
+    return new ApiError(429, message(missingUpstreamMessage(upstreamStatus)), {
       code: 'rate_limit_exceeded',
       upstream,
     });
   }
   if (status === 422) {
-    return new ApiError(400, message('CloudBase rejected the request during content moderation.'), {
+    return new ApiError(400, message(missingUpstreamMessage(upstreamStatus)), {
       code: 'moderation_blocked',
       upstream,
     });
@@ -263,12 +263,12 @@ function mapUpstreamError(err, context = {}) {
     });
   }
   if (status === 400) {
-    return new ApiError(400, message('CloudBase rejected the request with HTTP 400.'), {
+    return new ApiError(400, message(missingUpstreamMessage(upstreamStatus)), {
       code: 'upstream_invalid_request',
       upstream,
     });
   }
-  return new ApiError(502, message('CloudBase image generation failed.'), {
+  return new ApiError(502, message(missingUpstreamMessage(upstreamStatus)), {
     code: 'upstream_error',
     upstream,
   });
@@ -277,7 +277,6 @@ function mapUpstreamError(err, context = {}) {
 module.exports = {
   ApiError,
   mapUpstreamError,
-  buildUpstreamMessage,
   redactSecrets,
   inferUpstreamStatus,
   upstreamRecord,
