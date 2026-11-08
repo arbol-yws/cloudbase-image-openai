@@ -54,7 +54,8 @@
 
 本服务只做中转，不保存调用方凭据：
 
-- 每个请求的 `Authorization: Bearer <CloudBase API Key>` 就是该请求使用的上游凭据，服务按请求构造 CloudBase 客户端。
+- 每个请求的 `Authorization: Bearer <CloudBase API Key>` 就是该请求使用的上游凭据，服务按请求构造 CloudBase 客户端。`Bearer` 只是 HTTP 认证方案前缀，不属于 key 本身。
+- 只接受这一种格式，且只从请求头读取；缺少 `Bearer ` 前缀或前缀后为空都视为无效凭据，返回 401 `missing_credentials` 并说明正确格式。不从 query string 或请求体读取 key。
 - 请求头缺失且服务端未配置兜底凭据时，返回 `401 missing_credentials`，提示需要传 CloudBase API Key。
 - 服务端可用 `CLOUDBASE_APIKEY` 或 `CLOUDBASE_SECRET_ID` + `CLOUDBASE_SECRET_KEY` 配置兜底凭据；不配置也能启动。
 - 客户端按凭据哈希做短时内存缓存（10 分钟，最多 100 个），不落盘、不写日志。

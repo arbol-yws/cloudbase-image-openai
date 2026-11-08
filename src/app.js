@@ -11,14 +11,18 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+/**
+ * Only `Authorization: Bearer <key>` is accepted; CloudBase treats the key as
+ * a bearer credential. Query strings and bodies are intentionally ignored.
+ */
 function extractBearerToken(req) {
-  const header = req.get('authorization') || '';
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  const header = (req.get('authorization') || '').trim();
+  const match = /^Bearer\s+(.+)$/i.exec(header);
   return match ? match[1].trim() : '';
 }
 
 /**
- * The caller's Bearer token is the CloudBase API Key for that request.
+ * The caller's Authorization value is the CloudBase API Key for that request.
  * Server-side credentials, when configured, are only a fallback.
  */
 function resolveCredentials(req, config) {
@@ -70,7 +74,7 @@ function createApp({ config, logger = console }) {
       if (!credentials) {
         throw new ApiError(
           401,
-          'Missing CloudBase credentials. Send "Authorization: Bearer <CloudBase API Key>" using a server API Key for this environment, or configure a fallback key on the server.',
+          'CloudBase credentials are missing or malformed. Use exactly "Authorization: Bearer <CloudBase API Key>" with a server API Key for this environment, or configure a fallback key on the server.',
           { code: 'missing_credentials', type: 'authentication_error' },
         );
       }

@@ -137,6 +137,11 @@ test('Bearer token becomes the CloudBase API Key for the request', () => {
   assert.deepEqual(credentials, { accessKey: 'caller-key' });
 });
 
+test('rejects an Authorization header without the Bearer scheme', () => {
+  assert.equal(resolveCredentials(request({ headers: { authorization: 'raw-cloudbase-key' } }), {}), null);
+  assert.equal(resolveCredentials(request({ headers: { authorization: 'Bearer   ' } }), {}), null);
+});
+
 test('falls back to server credentials only when no Bearer token is sent', () => {
   assert.deepEqual(resolveCredentials(request(), { apiKey: 'server-key' }), { accessKey: 'server-key' });
   assert.deepEqual(
