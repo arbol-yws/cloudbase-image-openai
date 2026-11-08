@@ -96,13 +96,40 @@ docker compose up -d --build
 | `model` | string | 是 | CloudBase 模型标识，原样转发；缺失返回 400 `model_required` |
 | `prompt` | string | 是 | 图片描述 |
 | `n` | integer | 否 | 生成数量，默认 `1`，最大 `MAX_N` |
-| `size` | string | 否 | 透传给 CloudBase，如 `1024x1024` |
+| `size` | string | 否 | 显式传入时原样透传；省略且带参考图时按参考图宽高比换算（见下文「水印与尺寸」） |
 | `response_format` | string | 否 | `url`（默认）或 `b64_json` |
 | `image` / `image[]` / `images` | string \| string[] | 否 | 参考图扩展，支持公网 http(s) URL、data URL、原始 base64 |
 | `seed` | integer | 否 | 透传给 CloudBase；`n > 1` 时按序号派生 |
 | `revise` | boolean | 否 | 仅旧版协议，是否改写 prompt；默认取 `REVISE_PROMPT` |
 
 只做字段存在性与类型检查。`size` 的具体取值、prompt 长度、参考图数量和类型、`seed` 范围等均由 CloudBase 判定。未列出的字段会被忽略，不额外返回 400。
+
+## 水印与尺寸
+
+### 水印
+
+两条协议都只有一个水印字段 `footnote`（string，可选，最长 16 字符，生成在图片右下角），没有 `watermark` / `logo_add` 之类的布尔或数字开关。服务对每次 CloudBase 调用都发送 `footnote: ""`：按 string 类型传入空字符串，用空的水印文本替换默认的「AI生成」标识。
+
+- SDK 类型定义：`@cloudbase/ai` 的 `CloudbaseGenerateImageInput.footnote?: string`（Messages）与 `HunyuanARGenerateImageInput.footnote?: string`（旧版），见 `node_modules/@cloudbase/ai/src/type.ts`。
+- 官方文档：`footnote` 是「自定义水印内容」，两条协议各自列出该字段；文档没有规定最小长度，也没有单独的“关闭水印”参数。
+- 微信云开发文档说明 `footnote` 会替换输出图片右下角默认的「AI生成」标识。
+- 如果上游对空字符串返回 400，服务日志里的 `upstream.body` 会给出原文；当前按文档类型传空串是唯一有依据的关闭方式。
+
+### 尺寸
+
+- 调用方显式传 `size`：原样透传，保持 OpenAI 语义。
+- 未传 `size` 且有参考图：读取第一张参考图的宽高，按实际宽高比换算出文档支持的 `size`。
+- 两条协议都没有 `aspect_ratio` 字段，因此只能用 `size`（`${宽}x${高}`）表达比例。
+
+| 协议 | 换算规则 | 示例（参考图 1600×900） |
+| --- | --- | --- |
+| Messages | 按参考图比例缩放到 1.5K 面积档（文档 `generate_max_pixels` 默认 `2359296`），宽高限制在 [256, 8192]、面积不超过 4096×4096 | `size: "2048x1152"` |
+| 旧版 | 从文档四档 `1024x1024`、`1280x720`、`720x1280`、`1280x1280` 中选宽高比最接近的一档 | `size: "1280x720"` |
+
+参考图尺寸读取方式：
+
+- base64 / data URL：直接解析 PNG / JPEG / WebP 文件头。
+- 公网 URL：服务端只读取图片头部（最多 256KB、8 秒超时、不跟随重定向），并通过 DNS 解析限制只访问公网地址，避免 SSRF。读不到尺寸时不传 `size`，交回 CloudBase 决定。
 
 ## 请求示例
 
@@ -260,6 +287,8 @@ node scripts/probe-legacy.js \
 
 - [CloudBase 图片生成 Node SDK 调用](https://docs.cloudbase.net/ai/image-model/node-sdk)
 - [CloudBase Hy-Image-3.5-preview](https://docs.cloudbase.net/ai/image-model/hy-image-3.5-preview)
+- [CloudBase 自定义水印](https://docs.cloudbase.net/ai/image-model/custom-watermark)
 - [CloudBase 历史版本（旧模型）](https://docs.cloudbase.net/ai/image-model/legacy-image-model)
+- [微信云开发 AI 客户端 API（footnote）](https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloud/reference-sdk-api/extend/ai/client.html)
 - [CloudBase Node SDK 初始化与鉴权](https://docs.cloudbase.net/api-reference/server/node-sdk/initialization)
 - [CloudBase Node SDK AI 参考](https://docs.cloudbase.net/api-reference/server/node-sdk/ai)

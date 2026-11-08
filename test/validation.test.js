@@ -15,6 +15,14 @@ const { createCapture, runWithContext, recordResponse } = require('../src/upstre
 const TINY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
+// Patch IHDR dimensions; the CRC check is irrelevant for header parsing.
+function pngBase64(width, height) {
+  const png = Buffer.from(TINY_PNG_BASE64, 'base64');
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png.toString('base64');
+}
+
 function planConfig(overrides = {}) {
   return { maxN: 10, revisePrompt: true, ...overrides };
 }
@@ -174,6 +182,7 @@ test('legacy protocol maps URL references to image_urls and base64 to images', a
       model: 'HY-Image-v3.0-I2I-ToB-v1.0.1',
       prompt: '油画风格',
       image: 'https://example.com/reference.png',
+      size: '1024x1024',
     },
     planConfig(),
   );
@@ -192,6 +201,87 @@ test('legacy protocol maps URL references to image_urls and base64 to images', a
   await client.generateImages(base64Plan);
   assert.deepEqual(received[1].images, [TINY_PNG_BASE64]);
   assert.equal(received[1].image_urls, undefined);
+});
+
+test('derives the output size from a base64 reference when size is omitted', async () => {
+  const received = [];
+  const messagesModel = {
+    async generateImage(payload) {
+      received.push(payload);
+      return { choices: [{ delta: { image: { url: 'https://example.com/out.png' } } }] };
+    },
+  };
+  const legacyModel = {
+    async generateImage(payload) {
+      received.push(payload);
+      return { data: [{ url: 'https://example.com/out.png' }] };
+    },
+  };
+  const client = createCloudbaseClient(
+    clientConfig(),
+    { accessKey: 'caller-key' },
+    fakeSdk({ cloudbase: messagesModel, 'hunyuan-image': legacyModel }),
+  );
+  const reference = pngBase64(1600, 900);
+
+  await client.generateImages(
+    buildGenerationPlan({ model: 'hy-image-v3.5-preview', prompt: '猫', image: reference }, planConfig()),
+  );
+  assert.equal(received[0].size, '2048x1152');
+  assert.equal(received[0].footnote, '');
+
+  await client.generateImages(
+    buildGenerationPlan({ model: 'HY-Image-v3.0-I2I-ToB-v1.0.1', prompt: '猫', image: reference }, planConfig()),
+  );
+  assert.equal(received[1].size, '1280x720');
+  assert.equal(received[1].footnote, '');
+});
+
+test('keeps an explicit size instead of deriving it from the reference ratio', async () => {
+  const received = [];
+  const model = {
+    async generateImage(payload) {
+      received.push(payload);
+      return { data: [{ url: 'https://example.com/out.png' }] };
+    },
+  };
+  const client = createCloudbaseClient(
+    clientConfig(),
+    { accessKey: 'caller-key' },
+    fakeSdk({ 'hunyuan-image': model }),
+  );
+
+  await client.generateImages(
+    buildGenerationPlan(
+      { model: 'HY-Image-v3.0-I2I-ToB-v1.0.1', prompt: '猫', image: pngBase64(1600, 900), size: '1024x1024' },
+      planConfig(),
+    ),
+  );
+
+  assert.equal(received[0].size, '1024x1024');
+  assert.equal(received[0].footnote, '');
+});
+
+test('does not send a size when there is no reference image', async () => {
+  const received = [];
+  const model = {
+    async generateImage(payload) {
+      received.push(payload);
+      return { choices: [{ delta: { image: { url: 'https://example.com/out.png' } } }] };
+    },
+  };
+  const client = createCloudbaseClient(
+    clientConfig(),
+    { accessKey: 'caller-key' },
+    fakeSdk({ cloudbase: model }),
+  );
+
+  await client.generateImages(
+    buildGenerationPlan({ model: 'hy-image-v3.5-preview', prompt: '一只猫' }, planConfig()),
+  );
+
+  assert.equal(received[0].size, undefined);
+  assert.equal(received[0].footnote, '');
 });
 
 test('legacy image-to-image requests keep the SDK default AR endpoint config', async () => {
@@ -215,6 +305,7 @@ test('legacy image-to-image requests keep the SDK default AR endpoint config', a
       model: 'HY-Image-v3.0-I2I-ToB-v1.0.1',
       prompt: '油画风格',
       image: 'https://example.com/reference.png',
+      size: '1024x1024',
     },
     planConfig(),
   );

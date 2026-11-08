@@ -3,6 +3,7 @@
 const tcb = require('@cloudbase/node-sdk');
 const { ApiError, mapUpstreamError, responseRecord } = require('./errors');
 const { createCapture, runWithContext } = require('./upstream-capture');
+const { deriveOutputSize } = require('./images');
 
 function createCloudbaseClient(config, credentials, sdk = tcb) {
   if (!credentials?.accessKey && !(credentials?.secretId && credentials?.secretKey)) {
@@ -53,6 +54,8 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
       const payload = {
         model: plan.model,
         messages: [{ role: 'user', content }],
+        // Documented: empty string replaces the default "AI生成" watermark.
+        footnote: '',
       };
       if (plan.size) payload.size = plan.size;
       if (seed !== undefined) payload.seed = seed;
@@ -68,7 +71,7 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
       return { url: image.url };
     }
 
-    const payload = { model: plan.model, prompt: plan.prompt };
+    const payload = { model: plan.model, prompt: plan.prompt, footnote: '' };
     if (plan.size) payload.size = plan.size;
     if (seed !== undefined) payload.seed = seed;
     if (plan.revise !== undefined) payload.revise = { value: plan.revise };
@@ -92,7 +95,14 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
   }
 
   async function generateImages(plan) {
-    return Promise.all(Array.from({ length: plan.n }, (_, index) => generateOne(plan, index)));
+    // Neither protocol has an `aspect_ratio` field, so a caller-provided
+    // `size` is forwarded as-is; otherwise the reference ratio becomes `size`.
+    const size = plan.size === undefined
+      ? await deriveOutputSize(plan.images, plan.protocol)
+      : plan.size;
+    return Promise.all(
+      Array.from({ length: plan.n }, (_, index) => generateOne({ ...plan, size }, index)),
+    );
   }
 
   return { generateImages };
