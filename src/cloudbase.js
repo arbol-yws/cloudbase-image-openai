@@ -54,8 +54,9 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
       const payload = {
         model: plan.model,
         messages: [{ role: 'user', content }],
-        // Documented: empty string replaces the default "AI生成" watermark.
-        footnote: '',
+        // Empty string is rejected upstream; a single space is the confirmed
+        // value that leaves the watermark visually blank.
+        footnote: ' ',
       };
       if (plan.size) payload.size = plan.size;
       if (seed !== undefined) payload.seed = seed;
@@ -71,7 +72,7 @@ function createCloudbaseClient(config, credentials, sdk = tcb) {
       return { url: image.url };
     }
 
-    const payload = { model: plan.model, prompt: plan.prompt, footnote: '' };
+    const payload = { model: plan.model, prompt: plan.prompt, footnote: ' ' };
     if (plan.size) payload.size = plan.size;
     if (seed !== undefined) payload.seed = seed;
     if (plan.revise !== undefined) payload.revise = { value: plan.revise };

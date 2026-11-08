@@ -228,13 +228,13 @@ test('derives the output size from a base64 reference when size is omitted', asy
     buildGenerationPlan({ model: 'hy-image-v3.5-preview', prompt: '猫', image: reference }, planConfig()),
   );
   assert.equal(received[0].size, '2048x1152');
-  assert.equal(received[0].footnote, '');
+  assert.equal(received[0].footnote, ' ');
 
   await client.generateImages(
     buildGenerationPlan({ model: 'HY-Image-v3.0-I2I-ToB-v1.0.1', prompt: '猫', image: reference }, planConfig()),
   );
   assert.equal(received[1].size, '1280x720');
-  assert.equal(received[1].footnote, '');
+  assert.equal(received[1].footnote, ' ');
 });
 
 test('keeps an explicit size instead of deriving it from the reference ratio', async () => {
@@ -259,7 +259,7 @@ test('keeps an explicit size instead of deriving it from the reference ratio', a
   );
 
   assert.equal(received[0].size, '1024x1024');
-  assert.equal(received[0].footnote, '');
+  assert.equal(received[0].footnote, ' ');
 });
 
 test('does not send a size when there is no reference image', async () => {
@@ -281,7 +281,7 @@ test('does not send a size when there is no reference image', async () => {
   );
 
   assert.equal(received[0].size, undefined);
-  assert.equal(received[0].footnote, '');
+  assert.equal(received[0].footnote, ' ');
 });
 
 test('legacy image-to-image requests keep the SDK default AR endpoint config', async () => {

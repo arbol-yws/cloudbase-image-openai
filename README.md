@@ -108,12 +108,17 @@ docker compose up -d --build
 
 ### 水印
 
-两条协议都只有一个水印字段 `footnote`（string，可选，最长 16 字符，生成在图片右下角），没有 `watermark` / `logo_add` 之类的布尔或数字开关。服务对每次 CloudBase 调用都发送 `footnote: ""`：按 string 类型传入空字符串，用空的水印文本替换默认的「AI生成」标识。
+两条协议都只有一个水印字段 `footnote`（string，可选，最长 16 字符，生成在图片右下角），没有 `watermark` / `logo_add` 之类的布尔或数字开关。服务对每次 CloudBase 调用都发送 `footnote: " "`（单个空格）。
+
+为什么是空格而不是空字符串：
+
+- 用户实测确认上游拒绝 `footnote: ""`，空串不受支持。
+- 单个空格是文档允许的 string 取值，视觉上等同无水印，且不替换默认标识。
+- 该效果需以实测为准；如上游行为变化，看日志里的 `upstream.body`。
 
 - SDK 类型定义：`@cloudbase/ai` 的 `CloudbaseGenerateImageInput.footnote?: string`（Messages）与 `HunyuanARGenerateImageInput.footnote?: string`（旧版），见 `node_modules/@cloudbase/ai/src/type.ts`。
 - 官方文档：`footnote` 是「自定义水印内容」，两条协议各自列出该字段；文档没有规定最小长度，也没有单独的“关闭水印”参数。
-- 微信云开发文档说明 `footnote` 会替换输出图片右下角默认的「AI生成」标识。
-- 如果上游对空字符串返回 400，服务日志里的 `upstream.body` 会给出原文；当前按文档类型传空串是唯一有依据的关闭方式。
+- 微信云开发文档说明 `footnote` 是水印文本，会替换输出图片右下角默认的「AI生成」标识。
 
 ### 尺寸
 
