@@ -2,7 +2,8 @@
 
 const crypto = require('crypto');
 const express = require('express');
-const { ApiError } = require('./errors');
+const { ApiError, redactSecrets } = require('./errors');
+const { getCloudbaseClient } = require('./cloudbase');
 const { buildGenerationPlan } = require('./request');
 const { buildOpenAIResponse } = require('./response');
 
@@ -10,29 +11,27 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function requireAuth(req, config) {
-  if (!config.adapterApiKey) return;
-
+function extractBearerToken(req) {
   const header = req.get('authorization') || '';
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  if (!match) {
-    throw new ApiError(401, 'Missing bearer token. Set Authorization: Bearer <ADAPTER_API_KEY>.', {
-      code: 'missing_api_key',
-    });
-  }
-  if (!safeEqual(match[1], config.adapterApiKey)) {
-    throw new ApiError(401, 'Invalid bearer token.', { code: 'invalid_api_key' });
-  }
+  return match ? match[1].trim() : '';
 }
 
-function createApp({ config, client, logger = console }) {
+/**
+ * The caller's Bearer token is the CloudBase API Key for that request.
+ * Server-side credentials, when configured, are only a fallback.
+ */
+function resolveCredentials(req, config) {
+  const accessKey = extractBearerToken(req);
+  if (accessKey) return { accessKey };
+  if (config.apiKey) return { accessKey: config.apiKey };
+  if (config.secretId && config.secretKey) {
+    return { secretId: config.secretId, secretKey: config.secretKey };
+  }
+  return null;
+}
+
+function createApp({ config, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -67,7 +66,14 @@ function createApp({ config, client, logger = console }) {
   app.post(
     '/v1/images/generations',
     asyncHandler(async (req, res) => {
-      requireAuth(req, config);
+      const credentials = resolveCredentials(req, config);
+      if (!credentials) {
+        throw new ApiError(
+          401,
+          'Missing CloudBase credentials. Send "Authorization: Bearer <CloudBase API Key>" using a server API Key for this environment, or configure a fallback key on the server.',
+          { code: 'missing_credentials', type: 'authentication_error' },
+        );
+      }
 
       if (req.is('multipart/form-data')) {
         throw new ApiError(
@@ -83,6 +89,7 @@ function createApp({ config, client, logger = console }) {
       }
 
       const plan = buildGenerationPlan(req.body, config);
+      const client = getCloudbaseClient(config, credentials);
       const results = await client.generateImages(plan);
       const response = await buildOpenAIResponse(results, plan, config);
 
@@ -117,7 +124,7 @@ function createApp({ config, client, logger = console }) {
           level: 'error',
           msg: 'unhandled_error',
           request_id: req.requestId,
-          error: err?.message || String(err),
+          error: redactSecrets(err?.message || String(err)),
         }),
       );
       apiError = new ApiError(500, 'Internal server error.', { code: 'internal_error' });
@@ -131,7 +138,7 @@ function createApp({ config, client, logger = console }) {
           request_id: req.requestId,
           status: apiError.statusCode,
           code: apiError.code,
-          error: apiError.message,
+          error: redactSecrets(apiError.message),
         }),
       );
     }
@@ -142,4 +149,4 @@ function createApp({ config, client, logger = console }) {
   return app;
 }
 
-module.exports = { createApp, requireAuth, safeEqual };
+module.exports = { createApp, resolveCredentials, extractBearerToken };

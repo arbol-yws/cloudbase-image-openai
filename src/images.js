@@ -43,7 +43,7 @@ function assertMimeAllowed(mime, spec, index) {
   if (!spec.allowedImageMimeTypes.includes(mime)) {
     throw new ApiError(
       400,
-      `Reference image ${index} has type ${mime}, but model ${spec.name} supports ${spec.allowedImageMimeTypes.join(', ')}.`,
+      `Reference image ${index} has type ${mime}, but the ${spec.protocol} protocol supports ${spec.allowedImageMimeTypes.join(', ')}.`,
       { param: 'image', code: 'unsupported_image_type' },
     );
   }
@@ -53,7 +53,7 @@ function assertSizeAllowed(bytes, spec, index) {
   if (bytes > spec.maxImageBytes) {
     throw new ApiError(
       400,
-      `Reference image ${index} is ${(bytes / 1024 / 1024).toFixed(2)} MB, but model ${spec.name} allows at most ${(spec.maxImageBytes / 1024 / 1024).toFixed(0)} MB per image.`,
+      `Reference image ${index} is ${(bytes / 1024 / 1024).toFixed(2)} MB, but the ${spec.protocol} protocol allows at most ${(spec.maxImageBytes / 1024 / 1024).toFixed(0)} MB per image.`,
       { param: 'image', code: 'image_too_large' },
     );
   }
@@ -154,21 +154,12 @@ function collectImageValues(body) {
 function normalizeReferenceImages(body, spec) {
   const { values, field = 'image' } = collectImageValues(body);
 
-  if (values.length === 0) {
-    if (spec.requiresImage) {
-      throw new ApiError(
-        400,
-        `Model ${spec.name} is an image-to-image model and requires a reference image in "image" or "image[]". Use the default model for text-to-image requests.`,
-        { param: field, code: 'missing_reference_image' },
-      );
-    }
-    return [];
-  }
+  if (values.length === 0) return [];
 
   if (values.length > spec.maxImages) {
     throw new ApiError(
       400,
-      `Model ${spec.name} accepts at most ${spec.maxImages} reference image(s), but ${values.length} were provided.`,
+      `The ${spec.protocol} protocol accepts at most ${spec.maxImages} reference image(s) per request, but ${values.length} were provided.`,
       { param: field, code: 'too_many_images' },
     );
   }

@@ -96,6 +96,27 @@ function truncate(value, max = 600) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+const SECRET_PATTERNS = [
+  [/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]'],
+  [
+    /((?:secret[_-]?id|secret[_-]?key|access[_-]?key|api[_-]?key|apikey)\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi,
+    '$1[redacted]',
+  ],
+  [/\btcb-[A-Za-z0-9_-]{6,}\b/gi, 'tcb-[redacted]'],
+];
+
+/**
+ * Remove anything that looks like a credential before it reaches logs or
+ * API responses. Upstream messages are not trusted to be secret-free.
+ */
+function redactSecrets(value) {
+  let text = String(value ?? '');
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    text = text.replace(pattern, replacement);
+  }
+  return text;
+}
+
 /**
  * Convert a CloudBase SDK/network error into an OpenAI-style ApiError.
  *
@@ -109,8 +130,14 @@ function mapUpstreamError(err, context = {}) {
   const operation = context.operation || 'image generation';
   const status = inferUpstreamStatus(err);
   const code = String(err?.code ?? '');
-  const message = truncate(err?.message ?? 'Unknown upstream error');
+  const message = truncate(redactSecrets(err?.message ?? 'Unknown upstream error'));
   const requestId = err?.requestId ? ` (CloudBase request_id: ${err.requestId})` : '';
+  const envText = context.envId ? ` (env: ${context.envId})` : '';
+  const authMessage =
+    `CloudBase rejected the credential for this request${envText}.${requestId} `
+    + 'Use a CloudBase server API Key (not a Publishable/client key or a Tencent Cloud SecretId/SecretKey) '
+    + 'as "Authorization: Bearer <key>", and make sure the key belongs to this environment and that '
+    + `image generation is enabled for it. Upstream detail: ${message}`;
 
   if (isTimeout(err, message)) {
     return new ApiError(504, `CloudBase ${operation} timed out.${requestId}`, {
@@ -119,11 +146,7 @@ function mapUpstreamError(err, context = {}) {
   }
 
   if (isAuthenticationFailure(status, message)) {
-    return new ApiError(
-      502,
-      `CloudBase authentication failed while checking server credentials.${requestId} Upstream detail: ${message}`,
-      { code: 'upstream_authentication_error' },
-    );
+    return new ApiError(502, authMessage, { code: 'upstream_authentication_error' });
   }
 
   if (isRateLimit(status, message)) {
@@ -158,11 +181,7 @@ function mapUpstreamError(err, context = {}) {
   }
 
   if (status === 401 || status === 403) {
-    return new ApiError(
-      502,
-      `CloudBase authentication failed while checking server credentials.${requestId} Upstream detail: ${message}`,
-      { code: 'upstream_authentication_error' },
-    );
+    return new ApiError(502, authMessage, { code: 'upstream_authentication_error' });
   }
 
   return new ApiError(502, `CloudBase ${operation} failed.${requestId} Upstream detail: ${message}`, {
@@ -174,4 +193,5 @@ module.exports = {
   ApiError,
   mapUpstreamError,
   inferUpstreamStatus,
+  redactSecrets,
 };

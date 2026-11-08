@@ -1,9 +1,5 @@
 'use strict';
 
-const { getModelSpec, buildModelMap } = require('./models');
-
-const DEFAULT_MODEL = 'hy-image-v3.5-preview';
-
 function readString(env, names, fallback = '') {
   for (const name of names) {
     if (env[name] !== undefined && env[name] !== '') {
@@ -30,25 +26,6 @@ function parseBoolean(value, name, fallback) {
   throw new Error(`${name} must be a boolean (true/false)`);
 }
 
-function parseModelMap(raw) {
-  if (raw === undefined || raw === '') return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('MODEL_MAP must be valid JSON, e.g. {"my-model":"hy-image-v3.5-preview"}');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('MODEL_MAP must be a JSON object');
-  }
-  for (const [alias, target] of Object.entries(parsed)) {
-    if (typeof target !== 'string' || !target.trim()) {
-      throw new Error(`MODEL_MAP entry "${alias}" must be a non-empty string`);
-    }
-  }
-  return parsed;
-}
-
 function parseBodySize(value) {
   const size = String(value || '32mb').trim().toLowerCase();
   if (!/^\d+(kb|mb)$/.test(size)) {
@@ -67,21 +44,8 @@ function loadConfig(env = process.env) {
   const secretId = readString(env, ['CLOUDBASE_SECRET_ID', 'TENCENTCLOUD_SECRETID']);
   const secretKey = readString(env, ['CLOUDBASE_SECRET_KEY', 'TENCENTCLOUD_SECRETKEY']);
 
-  if (!apiKey && !(secretId && secretKey)) {
-    throw new Error(
-      'CloudBase credentials are missing. Set CLOUDBASE_APIKEY, or set both CLOUDBASE_SECRET_ID and CLOUDBASE_SECRET_KEY',
-    );
-  }
-
-  const modelMap = buildModelMap(parseModelMap(readString(env, ['MODEL_MAP'])));
-
-  const defaultAlias = readString(env, ['DEFAULT_MODEL'], DEFAULT_MODEL);
-  const defaultCanonical = modelMap[defaultAlias.toLowerCase()];
-  if (!defaultCanonical || !getModelSpec(defaultCanonical)) {
-    throw new Error(
-      `DEFAULT_MODEL "${defaultAlias}" is not a supported CloudBase model. Supported: ${Object.keys(modelMap).sort().join(', ')}`,
-    );
-  }
+  // Server-side credentials are optional: callers normally pass their own
+  // CloudBase API Key as a Bearer token, and these values are only a fallback.
 
   return {
     envId,
@@ -89,9 +53,6 @@ function loadConfig(env = process.env) {
     secretId,
     secretKey,
     port: parseInteger(readString(env, ['PORT']), 'PORT', 8080, 1, 65535),
-    adapterApiKey: readString(env, ['ADAPTER_API_KEY']),
-    defaultModel: defaultCanonical,
-    modelMap,
     upstreamTimeoutMs: parseInteger(
       readString(env, ['UPSTREAM_TIMEOUT_MS']),
       'UPSTREAM_TIMEOUT_MS',

@@ -1,7 +1,7 @@
 'use strict';
 
 const { ApiError } = require('./errors');
-const { resolveModel } = require('./models');
+const { PROTOCOLS, resolveProtocol } = require('./models');
 const { normalizeReferenceImages } = require('./images');
 
 const SUPPORTED_FIELDS = new Set([
@@ -19,6 +19,8 @@ const SUPPORTED_FIELDS = new Set([
   'footnote',
   'revise',
   'generate_max_pixels',
+  'resize_max_pixels',
+  'use_search_tool',
 ]);
 
 const UNSUPPORTED_FIELD_MESSAGES = {
@@ -48,19 +50,29 @@ function assertNoUnsupportedFields(body) {
   throw new ApiError(400, message, { param: field, code: 'unsupported_parameter' });
 }
 
-function parsePrompt(body, spec) {
+function parseModel(body) {
+  if (body.model === undefined || body.model === null) {
+    throw new ApiError(
+      400,
+      '`model` is required. Pass the CloudBase model identifier you want to use, for example "hy-image-v3.5-preview".',
+      { param: 'model', code: 'model_required' },
+    );
+  }
+  if (typeof body.model !== 'string' || !body.model.trim()) {
+    throw new ApiError(400, '`model` must be a non-empty string.', {
+      param: 'model',
+      code: 'invalid_model',
+    });
+  }
+  return body.model.trim();
+}
+
+function parsePrompt(body) {
   if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
     throw new ApiError(400, '`prompt` is required and must be a non-empty string.', {
       param: 'prompt',
       code: 'invalid_prompt',
     });
-  }
-  if (body.prompt.length > spec.maxPromptChars) {
-    throw new ApiError(
-      400,
-      `\`prompt\` is too long: ${body.prompt.length} characters, model ${spec.name} allows at most ${spec.maxPromptChars}.`,
-      { param: 'prompt', code: 'prompt_too_long' },
-    );
   }
   return body.prompt;
 }
@@ -82,7 +94,7 @@ function parseN(body, config) {
   return body.n;
 }
 
-function parseSize(body, spec) {
+function parseSize(body) {
   if (body.size === undefined || body.size === null) return undefined;
   if (typeof body.size !== 'string') {
     throw new ApiError(400, '`size` must be "auto" or "WIDTHxHEIGHT".', {
@@ -102,29 +114,9 @@ function parseSize(body, spec) {
     });
   }
 
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (
-    width < spec.minDimension ||
-    width > spec.maxDimension ||
-    height < spec.minDimension ||
-    height > spec.maxDimension
-  ) {
-    throw new ApiError(
-      400,
-      `\`size\` ${width}x${height} is not supported by ${spec.name}: width and height must be between ${spec.minDimension} and ${spec.maxDimension}.`,
-      { param: 'size', code: 'unsupported_size' },
-    );
-  }
-  if (width * height > spec.maxArea) {
-    throw new ApiError(
-      400,
-      `\`size\` ${width}x${height} is not supported by ${spec.name}: the maximum area is ${spec.maxArea} pixels.`,
-      { param: 'size', code: 'unsupported_size' },
-    );
-  }
-
-  return `${width}x${height}`;
+  // Size limits are upstream policy, not adapter policy: forward the requested
+  // dimensions and let CloudBase accept or reject them.
+  return `${Number(match[1])}x${Number(match[2])}`;
 }
 
 function parseResponseFormat(body) {
@@ -138,14 +130,13 @@ function parseResponseFormat(body) {
   return body.response_format;
 }
 
-function parseSeed(body, spec) {
+function parseSeed(body) {
   if (body.seed === undefined || body.seed === null) return undefined;
-  if (!Number.isSafeInteger(body.seed) || body.seed < spec.seedMin || body.seed > spec.seedMax) {
-    throw new ApiError(
-      400,
-      `\`seed\` must be a safe integer between ${spec.seedMin} and ${spec.seedMax} for ${spec.name}.`,
-      { param: 'seed', code: 'invalid_seed' },
-    );
+  if (!Number.isSafeInteger(body.seed) || body.seed < 0) {
+    throw new ApiError(400, '`seed` must be a non-negative integer.', {
+      param: 'seed',
+      code: 'invalid_seed',
+    });
   }
   return body.seed;
 }
@@ -153,7 +144,7 @@ function parseSeed(body, spec) {
 function parseSession(body, spec) {
   if (body.session === undefined || body.session === null) return undefined;
   if (!spec.supportsSession) {
-    throw new ApiError(400, `Model ${spec.name} does not support \`session\`.`, {
+    throw new ApiError(400, `The ${spec.protocol} protocol does not support \`session\`.`, {
       param: 'session',
       code: 'unsupported_parameter',
     });
@@ -183,7 +174,7 @@ function parseRevise(body, spec, config) {
     return spec.supportsRevise ? config.revisePrompt : undefined;
   }
   if (!spec.supportsRevise) {
-    throw new ApiError(400, `Model ${spec.name} does not support \`revise\`.`, {
+    throw new ApiError(400, `The ${spec.protocol} protocol does not support \`revise\`.`, {
       param: 'revise',
       code: 'unsupported_parameter',
     });
@@ -200,7 +191,7 @@ function parseRevise(body, spec, config) {
 function parseGenerateMaxPixels(body, spec) {
   if (body.generate_max_pixels === undefined || body.generate_max_pixels === null) return undefined;
   if (!spec.supportsGenerateMaxPixels) {
-    throw new ApiError(400, `Model ${spec.name} does not support \`generate_max_pixels\`.`, {
+    throw new ApiError(400, `The ${spec.protocol} protocol does not support \`generate_max_pixels\`.`, {
       param: 'generate_max_pixels',
       code: 'unsupported_parameter',
     });
@@ -213,6 +204,41 @@ function parseGenerateMaxPixels(body, spec) {
     );
   }
   return body.generate_max_pixels;
+}
+
+function parseResizeMaxPixels(body, spec) {
+  if (body.resize_max_pixels === undefined || body.resize_max_pixels === null) return undefined;
+  if (!spec.supportsResizeMaxPixels) {
+    throw new ApiError(400, `The ${spec.protocol} protocol does not support \`resize_max_pixels\`.`, {
+      param: 'resize_max_pixels',
+      code: 'unsupported_parameter',
+    });
+  }
+  if (!Number.isSafeInteger(body.resize_max_pixels) || body.resize_max_pixels <= 0) {
+    throw new ApiError(400, '`resize_max_pixels` must be a positive integer.', {
+      param: 'resize_max_pixels',
+      code: 'invalid_resize_max_pixels',
+    });
+  }
+  return body.resize_max_pixels;
+}
+
+function parseUseSearchTool(body, spec) {
+  if (body.use_search_tool === undefined || body.use_search_tool === null) return undefined;
+  if (!spec.supportsSearchTool) {
+    throw new ApiError(400, `The ${spec.protocol} protocol does not support \`use_search_tool\`.`, {
+      param: 'use_search_tool',
+      code: 'unsupported_parameter',
+    });
+  }
+  const value = body.use_search_tool.value;
+  if (typeof body.use_search_tool !== 'object' || Array.isArray(body.use_search_tool) || typeof value !== 'boolean') {
+    throw new ApiError(400, '`use_search_tool` must be an object shaped like { "value": true }.', {
+      param: 'use_search_tool',
+      code: 'invalid_use_search_tool',
+    });
+  }
+  return { value };
 }
 
 function parseUser(body) {
@@ -238,22 +264,30 @@ function buildGenerationPlan(body, config) {
 
   assertNoUnsupportedFields(body);
 
-  const spec = resolveModel(body.model, config.modelMap, config.defaultModel);
-  const prompt = parsePrompt(body, spec);
+  // The model is opaque to this adapter: it is forwarded to CloudBase as-is.
+  // Only the wire protocol is chosen locally, from the model name prefix.
+  const model = parseModel(body);
+  const protocol = resolveProtocol(model);
+  const spec = PROTOCOLS[protocol];
+
+  const prompt = parsePrompt(body);
   const images = normalizeReferenceImages(body, spec);
   const n = parseN(body, config);
-  const size = parseSize(body, spec);
+  const size = parseSize(body);
   const responseFormat = parseResponseFormat(body);
-  const seed = parseSeed(body, spec);
+  const seed = parseSeed(body);
   const session = parseSession(body, spec);
   const footnote = parseFootnote(body);
   const revise = parseRevise(body, spec, config);
   const generateMaxPixels = parseGenerateMaxPixels(body, spec);
+  const resizeMaxPixels = parseResizeMaxPixels(body, spec);
+  const useSearchTool = parseUseSearchTool(body, spec);
   const user = parseUser(body);
 
   return {
     spec,
-    model: spec.name,
+    model,
+    protocol,
     prompt,
     images,
     n,
@@ -264,6 +298,8 @@ function buildGenerationPlan(body, config) {
     footnote,
     revise,
     generateMaxPixels,
+    resizeMaxPixels,
+    useSearchTool,
     user,
   };
 }

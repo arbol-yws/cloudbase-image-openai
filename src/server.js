@@ -1,7 +1,6 @@
 'use strict';
 
 const { loadConfig } = require('./config');
-const { createCloudbaseClient } = require('./cloudbase');
 const { createApp } = require('./app');
 
 function main() {
@@ -13,23 +12,16 @@ function main() {
     process.exit(1);
   }
 
-  let client;
-  try {
-    client = createCloudbaseClient(config);
-  } catch (err) {
-    console.error(`[startup] Failed to initialize CloudBase SDK: ${err.message}`);
-    process.exit(1);
-  }
-
-  const app = createApp({ config, client });
+  const app = createApp({ config });
   const server = app.listen(config.port, () => {
     console.log(
       JSON.stringify({
         level: 'info',
         msg: 'server_started',
         port: config.port,
-        default_model: config.defaultModel,
-        auth_required: Boolean(config.adapterApiKey),
+        credentials_source: config.apiKey || (config.secretId && config.secretKey)
+          ? 'caller_bearer_with_server_fallback'
+          : 'caller_bearer',
       }),
     );
   });

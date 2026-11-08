@@ -6,9 +6,9 @@
 
 | 能力 | 支持情况 |
 | --- | --- |
-| 文生图 | 支持（默认模型 `hy-image-v3.5-preview`） |
+| 模型选择 | `model` 必填，由调用方指定并原样转发给 CloudBase，服务不做模型白名单 |
 | 参考图/图生图 | 支持，`image` / `image[]` / `images` 可传公网 URL、`data:image/...;base64,...` 或原始 base64 |
-| 多张参考图 | `hy-image-v3.5-preview` 最多 20 张；旧版 I2I 模型最多 1 张 |
+| 多张参考图 | Messages 协议（`hy-image-*`）最多 20 张；旧版协议最多 1 张 |
 | 指定尺寸 | 支持 `size: "WIDTHxHEIGHT"`，`auto` 表示交给 CloudBase 自动决定 |
 | 一次返回多张 | 支持 `n`，通过多次真实 CloudBase 调用实现 |
 | 返回 URL | 支持，直接返回 CloudBase 临时图片 URL |
@@ -16,52 +16,62 @@
 | `quality` / `style` / `background` / `output_format` / `stream` / `mask` | 不支持，会明确返回 400，而不是静默忽略 |
 | multipart/form-data | 不支持，仅接受 `application/json` |
 
-## 模型映射
+## 模型标识与协议分派
 
-服务按请求中的 `model` 解析到 CloudBase 模型，匹配不区分大小写。未传 `model` 时使用 `DEFAULT_MODEL`，传 `auto` 也会回退到默认模型。
+`model` 由调用方传入，服务不做白名单、别名或默认值：**缺少 `model` 返回 400 `model_required`**，其余取值原样转发给 CloudBase。这样上游新增模型时无需改代码。
 
-| 请求 model | CloudBase 模型 | CloudBase provider | 说明 |
-| --- | --- | --- | --- |
-| `hy-image-v3.5-preview`、`cloudbase`、`cloudbase-image`、`cloudbase-image-3.5`、`gpt-image-1`、`gpt-image-1.5`、`dall-e-3`、`dall-e-2` | `hy-image-v3.5-preview` | `cloudbase` | 当前模型；支持文本 + 最多 20 张参考图；URL 有效期 12 小时 |
-| `cloudbase-i2i`、`cloudbase-image-i2i`、`hunyuan-image-i2i`、`HY-Image-v3.0-I2I-ToB-v1.0.1` | `HY-Image-v3.0-I2I-ToB-v1.0.1` | `hunyuan-image` | 旧版 I2I 模型；必须传参考图；最多 1 张；URL 有效期 24 小时 |
+服务只决定“用哪种协议发送”，规则与具体版本号无关：
 
-可以用 `MODEL_MAP` 增加别名：
+| 判定条件 | 协议 | CloudBase provider | 请求形态 | 返回路径 |
+| --- | --- | --- | --- | --- |
+| `model` 以**小写**前缀 `hy-image-` 开头（区分大小写） | Chat/Messages | `cloudbase` | `messages` 内容块，文本与 `image_url` 混排 | `choices[0].delta.image.url` |
+| 其他任意 `model` | 旧版 classic | `hunyuan-image` | `prompt` + `image_urls` / `images` | `data[0].url` |
 
-```bash
-MODEL_MAP='{"my-image-model":"hy-image-v3.5-preview","my-i2i":"HY-Image-v3.0-I2I-ToB-v1.0.1"}'
-```
+这是**协议分派，不是模型白名单**：未知模型名同样会被转发，由 CloudBase 决定是否接受。判定刻意区分大小写：旧模型标识是大写的 `HY-Image-...`，不会被误送进 Messages 分支。
 
-`MODEL_MAP` 的值必须是上表中的 CloudBase 模型名，否则服务启动失败。
+旧版协议内部还有一条路由规则：请求带参考图时使用图生图端点（`images/generations`），不带参考图时使用文生图端点（SDK 默认 `images/ar/generations`）。服务按“是否带参考图”判断，不枚举模型版本。
 
-### 尺寸约束
+尺寸、prompt 长度、种子范围等属于上游策略，服务只做格式校验（如 `WIDTHxHEIGHT`、整数），其余透传；上游拒绝时会把原始信息映射回 OpenAI 错误结构。
 
-- `hy-image-v3.5-preview`：宽、高均在 `[256, 8192]`，面积不超过 `4096x4096`。
-- `HY-Image-v3.0-I2I-ToB-v1.0.1`：宽、高均在 `[512, 2048]`，面积不超过 `1024x1024`。例如 OpenAI 常用的 `1792x1024` 不适用于该旧模型。
+文档中的真实模型标识：
+
+| 模型标识 | 状态 | 能力 | 参考图 | 尺寸 | 返回 |
+| --- | --- | --- | --- | --- | --- |
+| `hy-image-v3.5-preview` | 当前版本 | 文生图 + 图生图 + 多轮编辑 | ≤20 张，单图 ≤20MB | 宽高 [256, 8192]，面积 ≤4096×4096 | `choices[0].delta.image.url`，12 小时 |
+| `HY-Image-3.0-Plus-4090-Tob-v1.0` | 已废弃 | 仅文生图 | 不支持 | `1024x1024`、`1280x720`、`720x1280`、`1280x1280` | `data[0].url`，24 小时 |
+| `HY-Image-v3.0-I2I-ToB-v1.0.1` | 已废弃 | 图生图（必须垫图） | 1 张，≤10MB，jpg/jpeg/png | 同上四档 | `data[0].url`，24 小时 |
+
+旧模型已废弃，新接入请使用 `hy-image-v3.5-preview`。
 
 ## 前置条件
 
 - Node.js >= 20
 - 已开通 CloudBase 环境，并具备生图资源/额度
 - CloudBase 环境 ID
-- 鉴权凭据，二选一：
-  - 推荐：CloudBase 服务端 API Key（`CLOUDBASE_APIKEY`）
-  - 或者：腾讯云 API 密钥对（`CLOUDBASE_SECRET_ID` + `CLOUDBASE_SECRET_KEY`）
+- 调用方自带的 CloudBase 服务端 API Key（通过 `Authorization: Bearer <key>` 传入）
+
+## 认证方式
+
+本服务只做中转，不保存调用方凭据：
+
+- 每个请求的 `Authorization: Bearer <CloudBase API Key>` 就是该请求使用的上游凭据，服务按请求构造 CloudBase 客户端。
+- 请求头缺失且服务端未配置兜底凭据时，返回 `401 missing_credentials`，提示需要传 CloudBase API Key。
+- 服务端可用 `CLOUDBASE_APIKEY` 或 `CLOUDBASE_SECRET_ID` + `CLOUDBASE_SECRET_KEY` 配置兜底凭据；不配置也能启动。
+- 客户端按凭据哈希做短时内存缓存（10 分钟，最多 100 个），不落盘、不写日志。
 
 ## 启动
 
 启动前必须设置：
 
 - `CLOUDBASE_ENV_ID`：必填
-- 凭据二选一：`CLOUDBASE_APIKEY`，或 `CLOUDBASE_SECRET_ID` + `CLOUDBASE_SECRET_KEY`
 
-缺少环境 ID 或鉴权凭据时，进程会直接退出，不会启动一个不可用的服务。
+凭据为可选项，仅作为调用方未传 Bearer 时的兜底。缺少环境 ID 时进程会直接退出；没有兜底凭据时服务仍可启动，但调用方必须自带 key。
 
 ### 本地 npm 运行
 
 ```bash
 npm install
 CLOUDBASE_ENV_ID=your-env-id \
-CLOUDBASE_APIKEY=your-api-key \
 PORT=8080 \
 npm start
 ```
@@ -75,7 +85,6 @@ docker build -t cloudbase-image-openai .
 docker run -d --name cloudbase-image-openai \
   -p 8080:8080 \
   -e CLOUDBASE_ENV_ID=your-env-id \
-  -e CLOUDBASE_APIKEY=your-api-key \
   cloudbase-image-openai
 ```
 
@@ -86,7 +95,6 @@ docker run -d --name cloudbase-image-openai \
   -p 9000:9000 \
   -e PORT=9000 \
   -e CLOUDBASE_ENV_ID=your-env-id \
-  -e CLOUDBASE_APIKEY=your-api-key \
   cloudbase-image-openai
 ```
 
@@ -94,7 +102,7 @@ docker run -d --name cloudbase-image-openai \
 
 ```bash
 cp .env.example .env
-# 编辑 .env：填写 CLOUDBASE_ENV_ID 和凭据
+# 编辑 .env：至少填写 CLOUDBASE_ENV_ID
 docker compose up -d --build
 ```
 
@@ -115,13 +123,10 @@ HOST_PORT=9000 docker compose up -d --build
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `CLOUDBASE_ENV_ID` | 是 | 无 | CloudBase 环境 ID |
-| `CLOUDBASE_APIKEY` | 二选一 | 无 | CloudBase 服务端 API Key，优先级高于密钥对 |
-| `CLOUDBASE_SECRET_ID` | 二选一 | 无 | 腾讯云 API `secretId`；也兼容 `TENCENTCLOUD_SECRETID` |
-| `CLOUDBASE_SECRET_KEY` | 二选一 | 无 | 腾讯云 API `secretKey`；也兼容 `TENCENTCLOUD_SECRETKEY` |
+| `CLOUDBASE_APIKEY` | 否 | 无 | 可选兜底：CloudBase 服务端 API Key，优先级高于密钥对 |
+| `CLOUDBASE_SECRET_ID` | 否 | 无 | 可选兜底：腾讯云 API `secretId`；也兼容 `TENCENTCLOUD_SECRETID` |
+| `CLOUDBASE_SECRET_KEY` | 否 | 无 | 可选兜底：腾讯云 API `secretKey`；也兼容 `TENCENTCLOUD_SECRETKEY` |
 | `PORT` | 否 | `8080` | HTTP 监听端口 |
-| `ADAPTER_API_KEY` | 否 | 空 | 调用方 Bearer Token；为空时接口不校验调用方身份 |
-| `DEFAULT_MODEL` | 否 | `hy-image-v3.5-preview` | 请求未传 `model` 时使用的模型 |
-| `MODEL_MAP` | 否 | `{}` | 额外模型别名，JSON 对象 |
 | `UPSTREAM_TIMEOUT_MS` | 否 | `900000` | CloudBase 请求超时，生图可能耗时数分钟 |
 | `MAX_N` | 否 | `10` | 单次请求允许的最大 `n` |
 | `MAX_CONCURRENCY` | 否 | `3` | `n > 1` 时并发调用 CloudBase 的上限 |
@@ -136,31 +141,35 @@ HOST_PORT=9000 docker compose up -d --build
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `model` | string | 否 | 模型别名；缺省使用 `DEFAULT_MODEL` |
+| `model` | string | 是 | CloudBase 模型标识，原样转发；缺失返回 400 `model_required` |
 | `prompt` | string | 是 | 图片描述 |
 | `n` | integer | 否 | 生成数量，默认 `1`，最大 `MAX_N` |
 | `size` | string | 否 | `auto` 或 `WIDTHxHEIGHT`，如 `1024x1024` |
 | `response_format` | string | 否 | `url`（默认）或 `b64_json` |
 | `image` / `image[]` / `images` | string \| string[] | 否 | 参考图，支持公网 http(s) URL、data URL、原始 base64 |
 | `seed` | integer | 否 | 固定种子；`n > 1` 时会按序号派生 |
-| `session` | string | 否 | 仅 `hy-image-v3.5-preview`，多轮请求保持一致 |
+| `session` | string | 否 | 仅 Messages 协议（`hy-image-*`），多轮请求保持一致 |
 | `footnote` | string | 否 | 水印，最多 16 个字符 |
-| `revise` | boolean | 否 | 仅旧版 I2I 模型，是否改写 prompt；默认取 `REVISE_PROMPT` |
-| `generate_max_pixels` | integer | 否 | 仅 `hy-image-v3.5-preview`，可选 `1048576`、`2359296`、`4194304` |
+| `revise` | boolean | 否 | 仅旧版协议，是否改写 prompt；默认取 `REVISE_PROMPT` |
+| `generate_max_pixels` | integer | 否 | 仅 Messages 协议，常用 `1048576`、`2359296`、`4194304` |
+| `resize_max_pixels` | integer | 否 | 仅 Messages 协议，参考图送入前缩放到的面积上限 |
+| `use_search_tool` | object | 否 | 仅 Messages 协议，形如 `{ "value": true }` |
 | `user` | string | 否 | 仅作为调用方标识接收，不传给 CloudBase |
 
 未列出的字段（包括 `quality`、`style`、`background`、`output_format`、`output_compression`、`moderation`、`stream`、`partial_images`、`input_fidelity`、`mask`）会返回 `400 unsupported_parameter`。
 
 ## 请求示例
 
+示例中的 `$CLOUDBASE_APIKEY` 是调用方自己的 CloudBase 服务端 API Key，经 `Authorization: Bearer` 透传给上游，服务不保存它。
+
 ### 文生图
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $ADAPTER_API_KEY" \
+  -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-image-1",
+    "model": "hy-image-v3.5-preview",
     "prompt": "一只胖胖的橘猫坐在窗台上打盹，水彩风格，温暖色调",
     "size": "1024x1024",
     "n": 1,
@@ -172,10 +181,10 @@ curl http://localhost:8080/v1/images/generations \
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $ADAPTER_API_KEY" \
+  -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "cloudbase-i2i",
+    "model": "HY-Image-v3.0-I2I-ToB-v1.0.1",
     "prompt": "将这张照片转换为油画风格",
     "image": "https://example.com/reference.jpg",
     "size": "1024x1024"
@@ -186,7 +195,7 @@ curl http://localhost:8080/v1/images/generations \
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $ADAPTER_API_KEY" \
+  -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "hy-image-v3.5-preview",
@@ -203,7 +212,7 @@ curl http://localhost:8080/v1/images/generations \
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
-  -H "Authorization: Bearer $ADAPTER_API_KEY" \
+  -H "Authorization: Bearer $CLOUDBASE_APIKEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "hy-image-v3.5-preview",
@@ -262,8 +271,9 @@ CloudBase 返回的图片 URL 是临时地址（新模型 12 小时、旧模型 
 
 | 场景 | HTTP 状态码 | `code` |
 | --- | --- | --- |
-| 请求字段/尺寸/图片参数非法 | `400` | 具体原因，如 `unsupported_parameter`、`unsupported_size`、`missing_reference_image` |
-| 调用方 Bearer Token 缺失或错误 | `401` | `missing_api_key` / `invalid_api_key` |
+| 缺少 `model` | `400` | `model_required` |
+| 请求字段/尺寸格式/图片参数非法 | `400` | 具体原因，如 `unsupported_parameter`、`invalid_size`、`too_many_images` |
+| 未带 Bearer 且服务端无兜底凭据 | `401` | `missing_credentials` |
 | 请求体过大 | `413` | `request_too_large` |
 | Content-Type 不是 `application/json` | `415` | `unsupported_media_type` |
 | 路由不存在 | `404` | `not_found` |
@@ -275,23 +285,24 @@ CloudBase 返回的图片 URL 是临时地址（新模型 12 小时、旧模型 
 | CloudBase 超时 | `504` | `upstream_timeout` |
 | 下载生成图片失败/超时 | `502` / `504` | `image_download_failed` / `image_download_timeout` |
 
-上游鉴权失败返回 `502` 而不是 `401`：调用方的 Bearer Token 可能是正确的，真正失败的是服务端配置的 CloudBase 凭据，属于网关上游故障。
+上游鉴权失败返回 `502`：请求已经带着调用方的 CloudBase API Key 到达网关，失败发生在 CloudBase 侧（key 类型不对、无该环境权限或环境未开通生图），属于上游故障；错误 message 会提示检查 key 类型与环境，但不会包含 key 本身。
 
 ## 实现说明
 
-- 按 CloudBase Node SDK 文档使用 `@cloudbase/node-sdk`（锁定 `3.18.7`）和 `@cloudbase/ai`（`2.32.0`）。
-- `hy-image-v3.5-preview` 通过 `ai.createImageModel('cloudbase')` 调用，参数为 `messages`（文本 + 参考图 content parts），结果读取 `choices[0].delta.image.url`。
-- 旧版 I2I 通过 `ai.createImageModel('hunyuan-image')` 调用，参数为 `prompt` + `image_urls` 或 `images`，结果读取 `data[0].url`。
+- 按 CloudBase Node SDK 文档使用 `@cloudbase/node-sdk`（`3.18.7`）和 `@cloudbase/ai`（`2.32.0`）。
+- 协议分派：`hy-image-*` 走 `ai.createImageModel('cloudbase')` + `messages`，结果读取 `choices[0].delta.image.url`；其他模型走 `ai.createImageModel('hunyuan-image')` + `prompt`/`image_urls`/`images`，结果读取 `data[0].url`。
+- 旧模型显式设置 `generateImageSubUrlConfig`：带参考图时走 `images/generations`，否则用 SDK 默认的 `images/ar/generations`。
 - `n > 1` 会发起 `n` 次真实 CloudBase 调用，并发数受 `MAX_CONCURRENCY` 限制。
-- 服务端不会把请求日志中的 prompt、参考图或凭据写入日志；请求日志只记录请求 ID、路径、状态码和耗时。
+- 请求日志只记录请求 ID、路径、状态码和耗时，不记录 prompt、参考图或任何凭据。
+- 上游错误 message 在返回与记录前会做脱敏：Bearer token、`accessKey`/`secretId`/`secretKey`、`tcb-*` 形态的 key 会被替换为 `[redacted]`。
 - Node SDK 的 HTTP 请求超时和进程内外层超时都会生效；HTTP Server 的 `requestTimeout` 也会随 `UPSTREAM_TIMEOUT_MS` 调整。
 
 ## 安全建议
 
 - 不要把 `.env`、API Key、密钥对提交到 Git。
-- 对外暴露时建议在反向代理后启用 TLS，并设置 `ADAPTER_API_KEY`。
-- CloudBase API Key 和腾讯云密钥对只应有生图所需的最小权限，并定期轮换。
-- 参考图 URL 由 CloudBase 侧拉取；不要在公网暴露本服务而未加鉴权。
+- 服务不持久化调用方凭据；如配置服务端兜底凭据，请使用最小权限并定期轮换。
+- 对外暴露时建议放在反向代理后启用 TLS，并由网关负责访问控制。
+- 参考图 URL 由 CloudBase 侧拉取，请确认 URL 可公网访问。
 
 ## 参考文档
 
