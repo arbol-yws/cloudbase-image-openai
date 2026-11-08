@@ -54,16 +54,10 @@ async function downloadAsBase64(url, config) {
 async function buildOpenAIResponse(results, plan, config) {
   const data = await Promise.all(
     results.map(async (result) => {
-      const item = {};
-      if (result.revisedPrompt) item.revised_prompt = result.revisedPrompt;
-
       if (plan.responseFormat === 'b64_json') {
-        item.b64_json = await downloadAsBase64(result.url, config);
-      } else {
-        item.url = result.url;
+        return { b64_json: await downloadAsBase64(result.url, config) };
       }
-
-      return item;
+      return { url: result.url };
     }),
   );
 

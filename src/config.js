@@ -61,13 +61,6 @@ function loadConfig(env = process.env) {
       1800000,
     ),
     maxN: parseInteger(readString(env, ['MAX_N']), 'MAX_N', 10, 1, 50),
-    maxConcurrency: parseInteger(
-      readString(env, ['MAX_CONCURRENCY']),
-      'MAX_CONCURRENCY',
-      3,
-      1,
-      20,
-    ),
     revisePrompt: parseBoolean(readString(env, ['REVISE_PROMPT']), 'REVISE_PROMPT', true),
     b64DownloadTimeoutMs: parseInteger(
       readString(env, ['B64_DOWNLOAD_TIMEOUT_MS']),

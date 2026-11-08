@@ -3,9 +3,10 @@
 const crypto = require('crypto');
 const express = require('express');
 const { ApiError, redactSecrets } = require('./errors');
-const { getCloudbaseClient } = require('./cloudbase');
+const { createCloudbaseClient } = require('./cloudbase');
 const { buildGenerationPlan } = require('./request');
 const { buildOpenAIResponse } = require('./response');
+const { runWithContext } = require('./upstream-capture');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -58,7 +59,9 @@ function createApp({ config, logger = console }) {
         }),
       );
     });
-    next();
+    // Keep the request id visible to process-level handlers and to any
+    // asynchronous work started from this request.
+    runWithContext({ requestId: req.requestId }, () => next());
   });
 
   app.use(express.json({ limit: config.maxBodySize }));
@@ -93,7 +96,7 @@ function createApp({ config, logger = console }) {
       }
 
       const plan = buildGenerationPlan(req.body, config);
-      const client = getCloudbaseClient(config, credentials);
+      const client = createCloudbaseClient(config, credentials);
       const results = await client.generateImages(plan);
       const response = await buildOpenAIResponse(results, plan, config);
 
@@ -109,7 +112,17 @@ function createApp({ config, logger = console }) {
 
   app.use((err, req, res, next) => {
     if (res.headersSent) {
-      next(err);
+      // Never leak a stack through Express' default handler.
+      logger.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'response_already_sent_error',
+          request_id: req.requestId,
+          error: redactSecrets(err?.message || String(err)),
+          stack: redactSecrets(err?.stack || ''),
+        }),
+      );
+      res.end();
       return;
     }
 
@@ -123,15 +136,34 @@ function createApp({ config, logger = console }) {
     } else if (err instanceof SyntaxError && (err.status === 400 || err.type === 'entity.parse.failed')) {
       apiError = new ApiError(400, 'Request body is not valid JSON.', { code: 'invalid_json' });
     } else {
+      // Any non-ApiError means an unexpected, synchronous or asynchronous
+      // failure. Log the full stack (redacted) plus the request id, but never
+      // expose it to the caller.
       logger.error(
         JSON.stringify({
           level: 'error',
           msg: 'unhandled_error',
           request_id: req.requestId,
           error: redactSecrets(err?.message || String(err)),
+          stack: redactSecrets(err?.stack || ''),
         }),
       );
       apiError = new ApiError(500, 'Internal server error.', { code: 'internal_error' });
+    }
+
+    if (apiError.upstream) {
+      // Log upstream diagnostics for 4xx as well, so a 400 never reaches the
+      // caller without a corresponding server-side record.
+      logger.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'upstream_error',
+          request_id: req.requestId,
+          status: apiError.statusCode,
+          code: apiError.code,
+          upstream: apiError.upstream,
+        }),
+      );
     }
 
     if (apiError.statusCode >= 500) {

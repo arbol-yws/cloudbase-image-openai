@@ -2,6 +2,33 @@
 
 const { loadConfig } = require('./config');
 const { createApp } = require('./app');
+const { redactSecrets } = require('./errors');
+const { getContext, getPatchState } = require('./upstream-capture');
+
+function logFatal(msg, value) {
+  const context = getContext();
+  const error = value instanceof Error ? value : new Error(String(value ?? 'unknown'));
+  console.error(
+    JSON.stringify({
+      level: 'error',
+      msg,
+      request_id: context?.requestId ?? null,
+      error: redactSecrets(error.message),
+      stack: redactSecrets(error.stack || ''),
+    }),
+  );
+}
+
+// Last-resort logging. Route errors are already handled by src/app.js and still
+// return the OpenAI error shape; these handlers only cover failures outside the
+// request pipeline, where a response can no longer be guaranteed.
+process.on('uncaughtException', (err) => {
+  logFatal('uncaught_exception', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logFatal('unhandled_rejection', reason);
+});
 
 function main() {
   let config;
@@ -22,16 +49,15 @@ function main() {
         credentials_source: config.apiKey || (config.secretId && config.secretKey)
           ? 'caller_bearer_with_server_fallback'
           : 'caller_bearer',
+        upstream_body_capture: getPatchState(),
       }),
     );
   });
 
-  // Node's default requestTimeout is 5 minutes, while CloudBase image generation
-  // can take up to 15 minutes. n > 1 is split into several concurrency-limited
-  // waves, so keep the HTTP request alive for the worst-case upstream budget.
-  const waves = Math.ceil(config.maxN / config.maxConcurrency);
+  // Node's default requestTimeout is 5 minutes; CloudBase image generation can
+  // take up to 15 minutes.
   server.requestTimeout =
-    config.upstreamTimeoutMs * waves + config.b64DownloadTimeoutMs + 30000;
+    config.upstreamTimeoutMs + config.b64DownloadTimeoutMs + 30000;
 
   const shutdown = (signal) => {
     console.log(JSON.stringify({ level: 'info', msg: 'server_stopping', signal }));
