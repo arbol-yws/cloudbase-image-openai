@@ -202,14 +202,14 @@ curl http://localhost:8080/v1/images/generations \
 
 CloudBase 返回的是临时 URL（新模型 12 小时、旧模型 24 小时有效）。需要长期保存时使用 `b64_json` 或调用后自行转存。
 
-## 错误结构与上游取证
+## 错误结构与上游信息
 
 失败响应严格保持 OpenAI 错误对象，只有四个字段：
 
 ```json
 {
   "error": {
-    "message": "CloudBase rejected the request with HTTP 400.",
+    "message": "[adapter] CloudBase rejected the request with HTTP 400. [upstream] status 400, code \"InvalidParameter\", message \"images must contain 1 item\", request_id \"db5f96a2-...\".",
     "type": "invalid_request_error",
     "param": null,
     "code": "upstream_invalid_request"
@@ -217,29 +217,19 @@ CloudBase 返回的是临时 URL（新模型 12 小时、旧模型 24 小时有�
 }
 ```
 
-诊断信息不放进响应，只写服务端日志。上游 4xx/5xx 会额外记录一条 `upstream_error`：
+`error.message` 由两段纯文本组成，上游原文直接可见，不需要再看日志：
 
-```json
-{
-  "level": "error",
-  "msg": "upstream_error",
-  "request_id": "...",
-  "status": 400,
-  "code": "upstream_invalid_request",
-  "upstream": {
-    "status": 400,
-    "request_id": "db5f96a2-...",
-    "headers": { "content-type": "application/json" },
-    "body": "{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"...\"}}",
-    "body_available": true
-  }
-}
-```
+- `[adapter]`：本适配层对错误的概括，例如“CloudBase rejected the request with HTTP 400.”。
+- `[upstream]`：上游原始信息，包含 HTTP 状态码、CloudBase 返回的 `code`、`message` 和 `request_id`；如果 SDK 没有透出 body，会回退为 SDK 抛出的原始错误文本，`request_id` 显示 `"unknown"`。
+- 单段文本最多 800 字符，超出部分追加 `... [truncated]`；`Bearer` token、`accessKey`/`secretId`/`secretKey`、`tcb-*` 形态的 key 一律替换为 `[redacted]`。
+- 除 `message` 外不新增任何顶层或 `error` 下的键，`type` / `param` / `code` 语义与 OpenAI 保持一致。
 
-- 抓取方式是包装 SDK 的 `tcbopenapicommonrequester.request`，在传输边界拿到原始 `{ statusCode, headers, body }`，用 `AsyncLocalStorage` 按请求隔离。
-- 日志中的 `body`、`message`、`headers` 都会脱敏：`Bearer` token、`accessKey`/`secretId`/`secretKey`、`tcb-*` 形态的 key 替换为 `[redacted]`。
-- 如果 SDK 没有暴露 body，`body_available` 为 `false`。这表示上游响应体没有被 SDK 透出，而不是服务伪造了 body。
-- 如果消息在 2ms 内返回 500 且没有任何上游调用，说明异常发生在请求解析或客户端构造阶段；服务会记录 `unhandled_error`，带 `request_id` 和完整 `stack`（脱敏），响应仍是上面的 OpenAI 错误结构，不向调用方泄漏 stack。
+服务端日志：
+
+- 每个请求只有一行 `http_request`：`request_id`、`method`、`path`、`status`、`duration_ms`、`upstream_request_id`（来自 CloudBase 响应头）。
+- 不再输出上游原始响应体，避免重复和敏感信息落盘；上游详情已经并入响应的 `error.message`。
+- 只有未捕获异常（服务自身 bug）才额外记录 `unhandled_error` / `uncaught_exception`，带 `request_id` 和完整 `stack`（脱敏）；stack 不会返回给调用方。
+- 抓取方式不变：包装 SDK 的 `tcbopenapicommonrequester.request`，在传输边界拿到 `{ statusCode, headers, body }`，用 `AsyncLocalStorage` 按请求隔离；body 只用于拼 `error.message`。
 
 状态码映射：
 
@@ -258,7 +248,7 @@ CloudBase 返回的是临时 URL（新模型 12 小时、旧模型 24 小时有�
 | CloudBase 超时 | `504` | `upstream_timeout` |
 | 下载生成图片失败/超时 | `502` / `504` | `image_download_failed` / `image_download_timeout` |
 
-环境里没有对应模型时，上游通常返回 400（参数或模型不支持）或 403（模型/环境权限）。具体原因以日志里的 `upstream.body` 为准。
+环境里没有对应模型时，上游通常返回 400（参数或模型不支持）或 403（模型/环境权限）。具体原因以响应 `error.message` 的 `[upstream]` 段为准；服务端日志不再记录上游原文。
 
 ## 上游探针
 
@@ -279,7 +269,7 @@ node scripts/probe-legacy.js \
 - Messages 分支：`ai.createImageModel('cloudbase')`，参考图放进 `messages` 内容块，结果读 `choices[0].delta.image.url`。
 - 旧版分支：`ai.createImageModel('hunyuan-image')`，结果读 `data[0].url`，端点由 SDK 决定。
 - `n > 1` 会发起 `n` 次真实 CloudBase 调用。
-- 请求日志只记录请求 ID、路径、状态码和耗时，不记录 prompt、参考图或凭据。
+- 请求日志只记录请求 ID、method、path、状态码、耗时和上游 request_id，不记录 prompt、参考图、上游响应体或凭据。
 
 ## 安全建议
 

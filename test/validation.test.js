@@ -337,13 +337,15 @@ test('empty upstream responses log the response body without changing the API sh
       assert.equal(err.code, 'upstream_empty_response');
       assert.equal(err.upstream.body_available, true);
       assert.match(err.upstream.body, /\{\}/);
+      assert.match(err.message, /\[upstream\] status 200/);
+      assert.match(err.message, /body "\{\}"/);
       assert.deepEqual(Object.keys(err.toJSON().error).sort(), ['code', 'message', 'param', 'type']);
       return true;
     },
   );
 });
 
-test('extracts an axios-style upstream 400 body for logging and redacts it', () => {
+test('extracts an axios-style upstream 400 body into the response message and redacts it', () => {
   const error = new Error('Request failed with status code 400');
   error.code = '400';
   error.response = {
@@ -360,7 +362,14 @@ test('extracts an axios-style upstream 400 body for logging and redacts it', () 
   assert.match(mapped.upstream.body, /InvalidParameter/);
   assert.doesNotMatch(mapped.upstream.body, /secret-value/);
   assert.equal(mapped.upstream.headers.authorization, undefined);
-  assert.doesNotMatch(mapped.message, /image_urls is invalid/);
+
+  const message = mapped.toJSON().error.message;
+  assert.match(message, /\[adapter\]/);
+  assert.match(message, /\[upstream\]/);
+  assert.match(message, /status 400/);
+  assert.match(message, /code "InvalidParameter"/);
+  assert.match(message, /rid-from-header/);
+  assert.doesNotMatch(message, /secret-value/);
   assert.deepEqual(Object.keys(mapped.toJSON().error).sort(), ['code', 'message', 'param', 'type']);
 });
 
@@ -386,6 +395,8 @@ test('captures the SDK transport response body through AsyncLocalStorage', async
   assert.equal(mapped.upstream.status, 400);
   assert.equal(mapped.upstream.body_available, true);
   assert.match(mapped.upstream.body, /images must contain 1 item/);
+  assert.match(mapped.toJSON().error.message, /code "InvalidParameter"/);
+  assert.match(mapped.toJSON().error.message, /rid-from-capture/);
 });
 
 test('marks the upstream body as unavailable when the SDK swallowed it', () => {
@@ -396,6 +407,11 @@ test('marks the upstream body as unavailable when the SDK swallowed it', () => {
   assert.equal(mapped.statusCode, 400);
   assert.equal(mapped.upstream.body_available, false);
   assert.equal(mapped.upstream.body, null);
+
+  const message = mapped.toJSON().error.message;
+  assert.match(message, /\[upstream\] status 400/);
+  assert.match(message, /Request failed with status code 400/);
+  assert.match(message, /request_id "unknown"/);
 });
 
 test('builds exactly the OpenAI success structure', async () => {

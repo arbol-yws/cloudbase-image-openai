@@ -53,6 +53,97 @@ function truncate(value, limit = 4000) {
   return text.length > limit ? `${text.slice(0, limit)}... [truncated]` : text;
 }
 
+const MESSAGE_TEXT_LIMIT = 800;
+
+function firstText(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number') return String(value);
+  }
+  return undefined;
+}
+
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function headerValue(headers, name) {
+  if (!headers || typeof headers !== 'object') return undefined;
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name) {
+      return Array.isArray(value) ? value.join(', ') : String(value);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Pick the upstream code/message/request_id out of the captured body. Supports
+ * the shapes CloudBase actually returns: `{ error: { code, message } }`,
+ * `{ Response: { Error: { Code, Message }, RequestId } }`, and flat fields.
+ */
+function upstreamDetails(err, capture) {
+  const last = capture?.last;
+  const response = err?.response ?? err?.cause?.response;
+  const json = plainObject(last?.body?.json) ?? plainObject(response?.data);
+  const node = plainObject(json?.error)
+    ?? plainObject(json?.Error)
+    ?? plainObject(json?.Response?.Error)
+    ?? json;
+  const errCode = String(err?.code ?? '');
+
+  return {
+    code: firstText(
+      node?.code,
+      node?.Code,
+      json?.code,
+      json?.Code,
+      /^\d{3}$/.test(errCode) ? undefined : errCode,
+      err?.name === 'InvalidParamsError' ? 'INVALID_PARAMS' : undefined,
+    ),
+    message: firstText(
+      node?.message,
+      node?.Message,
+      json?.message,
+      json?.Message,
+      json?.errMsg,
+      err?.name === 'InvalidParamsError' ? err?.message : undefined,
+      err?.message,
+    ),
+    request_id: firstText(
+      last?.request_id,
+      err?.requestId,
+      headerValue(response?.headers, 'x-cloudbase-request-id'),
+      headerValue(response?.headers, 'x-request-id'),
+      json?.request_id,
+      json?.RequestId,
+      json?.error?.request_id,
+    ),
+    body: last?.body?.text
+      ?? (response?.data !== undefined ? safeStringify(response.data) : null),
+  };
+}
+
+/**
+ * The caller-facing message carries both parts: `[adapter]` is this service's
+ * summary, `[upstream]` is the original CloudBase status/code/message and its
+ * request id. Everything is redacted and truncated.
+ */
+function buildUpstreamMessage(base, details = {}) {
+  const parts = [`status ${details.status ?? 'unknown'}`];
+  if (details.code) {
+    parts.push(`code "${truncate(redactSecrets(details.code), 120)}"`);
+  }
+  if (details.message) {
+    parts.push(`message "${truncate(redactSecrets(details.message), MESSAGE_TEXT_LIMIT)}"`);
+  }
+  if (!details.code && !details.message && details.body) {
+    parts.push(`body "${truncate(redactSecrets(details.body), MESSAGE_TEXT_LIMIT)}"`);
+  }
+  parts.push(`request_id "${details.request_id ?? 'unknown'}"`);
+  return `[adapter] ${base} [upstream] ${parts.join(', ')}.`;
+}
+
 function inferUpstreamStatus(err) {
   for (const value of [err?.statusCode, err?.status, err?.response?.status]) {
     const parsed = Number(value);
@@ -126,55 +217,58 @@ function responseRecord(result, capture) {
 }
 
 /**
- * Map a CloudBase SDK/network failure to an OpenAI-style error. The standard
- * `message` stays generic; the raw upstream response lives on `err.upstream`
- * for the server log.
+ * Map a CloudBase SDK/network failure to an OpenAI-style error. The message
+ * keeps the strict four-field shape and carries the upstream status/code/
+ * message/request_id in plain text, so the caller can see why it was rejected
+ * without reading server logs.
  */
 function mapUpstreamError(err, context = {}) {
   if (err instanceof ApiError) return err;
 
   const status = inferUpstreamStatus(err);
   const upstream = upstreamRecord(err, context.capture);
+  const details = upstreamDetails(err, context.capture);
   const text = upstream.body ?? String(err?.message ?? '');
+  const message = (base) => buildUpstreamMessage(base, { ...details, status: upstream.status });
 
   if (isTimeout(err, text)) {
-    return new ApiError(504, 'CloudBase image generation timed out.', {
+    return new ApiError(504, message('CloudBase image generation timed out.'), {
       code: 'upstream_timeout',
       upstream,
     });
   }
   if (status === 401 || status === 403) {
-    return new ApiError(502, 'CloudBase rejected the request credential or environment permission.', {
+    return new ApiError(502, message('CloudBase rejected the request credential or environment permission.'), {
       code: 'upstream_authentication_error',
       upstream,
     });
   }
   if (status === 429) {
-    return new ApiError(429, 'CloudBase rate limit exceeded.', {
+    return new ApiError(429, message('CloudBase rate limit exceeded.'), {
       code: 'rate_limit_exceeded',
       upstream,
     });
   }
   if (status === 422) {
-    return new ApiError(400, 'CloudBase rejected the request during content moderation.', {
+    return new ApiError(400, message('CloudBase rejected the request during content moderation.'), {
       code: 'moderation_blocked',
       upstream,
     });
   }
   if (err?.name === 'InvalidParamsError' || String(err?.code ?? '') === 'INVALID_PARAMS') {
-    return new ApiError(400, 'CloudBase rejected the request parameters.', {
+    return new ApiError(400, message('CloudBase rejected the request parameters.'), {
       param: err?.field,
       code: 'invalid_parameter',
       upstream,
     });
   }
   if (status === 400) {
-    return new ApiError(400, 'CloudBase rejected the request with HTTP 400.', {
+    return new ApiError(400, message('CloudBase rejected the request with HTTP 400.'), {
       code: 'upstream_invalid_request',
       upstream,
     });
   }
-  return new ApiError(502, 'CloudBase image generation failed.', {
+  return new ApiError(502, message('CloudBase image generation failed.'), {
     code: 'upstream_error',
     upstream,
   });
@@ -183,6 +277,7 @@ function mapUpstreamError(err, context = {}) {
 module.exports = {
   ApiError,
   mapUpstreamError,
+  buildUpstreamMessage,
   redactSecrets,
   inferUpstreamStatus,
   upstreamRecord,

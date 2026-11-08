@@ -47,6 +47,8 @@ function createApp({ config, logger = console }) {
     const startedAt = Date.now();
 
     res.on('finish', () => {
+      // One line per request. Upstream body is intentionally not logged; the
+      // caller-facing error.message now carries it.
       logger.info(
         JSON.stringify({
           level: 'info',
@@ -56,6 +58,7 @@ function createApp({ config, logger = console }) {
           path: req.path,
           status: res.statusCode,
           duration_ms: Date.now() - startedAt,
+          upstream_request_id: res.locals.upstreamRequestId ?? null,
         }),
       );
     });
@@ -151,32 +154,8 @@ function createApp({ config, logger = console }) {
       apiError = new ApiError(500, 'Internal server error.', { code: 'internal_error' });
     }
 
-    if (apiError.upstream) {
-      // Log upstream diagnostics for 4xx as well, so a 400 never reaches the
-      // caller without a corresponding server-side record.
-      logger.error(
-        JSON.stringify({
-          level: 'error',
-          msg: 'upstream_error',
-          request_id: req.requestId,
-          status: apiError.statusCode,
-          code: apiError.code,
-          upstream: apiError.upstream,
-        }),
-      );
-    }
-
-    if (apiError.statusCode >= 500) {
-      logger.error(
-        JSON.stringify({
-          level: 'error',
-          msg: 'request_failed',
-          request_id: req.requestId,
-          status: apiError.statusCode,
-          code: apiError.code,
-          error: redactSecrets(apiError.message),
-        }),
-      );
+    if (apiError.upstream?.request_id) {
+      res.locals.upstreamRequestId = apiError.upstream.request_id;
     }
 
     res.status(apiError.statusCode).json(apiError.toJSON());
